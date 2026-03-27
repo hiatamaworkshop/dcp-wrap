@@ -1,0 +1,4 @@
+node_modules/
+dist/
+dcp-schemas/
+*.tsbuildinfo

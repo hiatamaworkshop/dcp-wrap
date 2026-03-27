@@ -1,0 +1,40 @@
+{
+  "name": "dcp-wrap",
+  "version": "0.1.0",
+  "description": "Convert JSON to DCP positional-array format for AI agents",
+  "type": "module",
+  "main": "dist/index.js",
+  "types": "dist/index.d.ts",
+  "bin": {
+    "dcp-wrap": "dist/cli.js"
+  },
+  "exports": {
+    ".": {
+      "import": "./dist/index.js",
+      "types": "./dist/index.d.ts"
+    }
+  },
+  "scripts": {
+    "build": "tsc",
+    "dev": "tsc --watch",
+    "test": "node --test dist/**/*.test.js"
+  },
+  "files": [
+    "dist",
+    "README.md"
+  ],
+  "dependencies": {},
+  "devDependencies": {
+    "@types/node": "^20.0.0",
+    "typescript": "^5.3.0"
+  },
+  "keywords": [
+    "dcp",
+    "ai",
+    "llm",
+    "tokens",
+    "mcp",
+    "positional-array"
+  ],
+  "license": "Apache-2.0"
+}
