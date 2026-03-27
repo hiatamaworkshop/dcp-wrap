@@ -123,6 +123,34 @@ Nested objects are automatically flattened via dot-notation:
 
 The generator maps `metadata.author` → `author`, `metadata.state` → `state`. The mapping file records the full paths for encoding.
 
+## Working with messy data
+
+Real-world APIs return deeply nested objects, inconsistent fields, and dozens of keys you don't need. The generator applies three guards by default:
+
+| Guard | Default | What it does |
+|-------|---------|-------------|
+| `maxDepth` | 3 | Stops flattening at 3 levels. `a.b.c` is resolved; `a.b.c.d.e` is kept as an opaque value. |
+| `maxFields` | 20 | Keeps the top 20 fields by DCP priority (identifiers → classifiers → numerics → text). The rest are dropped. |
+| `minPresence` | 0.1 | Fields appearing in less than 10% of samples are excluded. |
+
+Override when needed:
+
+```typescript
+const draft = gen.fromSamples(samples, {
+  domain: "some-api",
+  maxDepth: 2,       // very flat — only top-level and one level of nesting
+  maxFields: 10,     // aggressive trim
+  minPresence: 0.5,  // field must appear in at least half the samples
+});
+```
+
+**Always review the generated schema before using it in production.** The generator infers — it does not know your intent. Check:
+
+- Are the right fields included? Use `include` / `exclude` to override.
+- Are field names sensible? Nested paths become leaf names (`metadata.author` → `author`). Use `fieldNames` to rename.
+- Are array fields handled correctly? Arrays are auto-joined with comma in `dcpEncode()`. Use `transform` for custom serialization.
+- Is the schema ID correct? The generator derives `{domain}:v{version}` from your input. This ID is how consumers identify the schema.
+
 ## Design
 
 - **Zero runtime dependencies**
