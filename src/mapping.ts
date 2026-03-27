@@ -1,15 +1,27 @@
 import type { FieldMappingDef } from "./types.js";
 
-/** Flatten nested object into dot-notation keys with leaf values. */
+/** Flatten nested object into dot-notation keys with leaf values.
+ *  @param maxDepth - max nesting depth (default: unlimited). 0 = top-level only.
+ */
 export function flattenKeys(
   obj: Record<string, unknown>,
   prefix = "",
+  maxDepth = Infinity,
 ): Record<string, unknown> {
   const result: Record<string, unknown> = {};
+  const currentDepth = prefix ? prefix.split(".").length : 0;
   for (const [k, v] of Object.entries(obj)) {
     const fullKey = prefix ? `${prefix}.${k}` : k;
-    if (v !== null && typeof v === "object" && !Array.isArray(v)) {
-      Object.assign(result, flattenKeys(v as Record<string, unknown>, fullKey));
+    if (
+      v !== null &&
+      typeof v === "object" &&
+      !Array.isArray(v) &&
+      currentDepth < maxDepth
+    ) {
+      Object.assign(
+        result,
+        flattenKeys(v as Record<string, unknown>, fullKey, maxDepth),
+      );
     } else {
       result[fullKey] = v;
     }

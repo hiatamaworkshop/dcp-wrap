@@ -134,12 +134,15 @@ export class SchemaGenerator {
     const excludeSet = new Set(options.exclude ?? []);
     const includeSet = options.include ? new Set(options.include) : null;
     const fieldNames = options.fieldNames ?? {};
+    const maxDepth = options.maxDepth ?? 3;
+    const maxFields = options.maxFields ?? 20;
+    const minPresence = options.minPresence ?? 0.1;
 
     // Step 1: Flatten and collect per-path values
     const pathValues = new Map<string, unknown[]>();
 
     for (const sample of samples) {
-      const flat = flattenKeys(sample);
+      const flat = flattenKeys(sample, "", maxDepth);
       const seenPaths = new Set<string>();
 
       for (const [path, value] of Object.entries(flat)) {
@@ -163,13 +166,23 @@ export class SchemaGenerator {
     }
 
     // Step 2: Analyze each field
-    const analyzed: AnalyzedField[] = [];
+    let analyzed: AnalyzedField[] = [];
 
     for (const [sourcePath, values] of pathValues) {
       const schemaName = fieldNames[sourcePath] ?? sourcePath.split(".").pop()!;
       const category = classifyField(schemaName, values);
       const typeInfo = inferType(values);
       analyzed.push({ schemaName, sourcePath, category, typeInfo, values });
+    }
+
+    // Step 2.5: Drop low-presence fields (appear in < minPresence of samples)
+    analyzed = analyzed.filter((f) => {
+      const presence = f.values.filter((v) => v != null).length / f.values.length;
+      return presence >= minPresence;
+    });
+
+    if (analyzed.length === 0) {
+      throw new Error("no fields survive presence filter");
     }
 
     // Step 3: Sort by DCP convention
@@ -184,6 +197,11 @@ export class SchemaGenerator {
 
       return a.schemaName.localeCompare(b.schemaName);
     });
+
+    // Step 3.5: Cap at maxFields (keep highest-priority fields)
+    if (analyzed.length > maxFields) {
+      analyzed = analyzed.slice(0, maxFields);
+    }
 
     // Step 4: Deduplicate field names
     const seenNames = new Map<string, number>();

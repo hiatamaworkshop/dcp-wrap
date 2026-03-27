@@ -31,6 +31,12 @@ export interface GenerateOptions {
   include?: string[];
   exclude?: string[];
   fieldNames?: Record<string, string>;
+  /** Max nesting depth to flatten (default: 3). Deeper paths are ignored. */
+  maxDepth?: number;
+  /** Max fields in generated schema (default: 20). Lowest-presence fields are dropped. */
+  maxFields?: number;
+  /** Min presence rate to include a field, 0-1 (default: 0.1). Fields appearing in <10% of samples are dropped. */
+  minPresence?: number;
 }
 
 /** Inference report for a single field. */
