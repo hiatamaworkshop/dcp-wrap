@@ -72,23 +72,45 @@ npx dcp-wrap inspect dcp-schemas/api-response.v1.json
 
 ## Programmatic API
 
+### Quick — one function, no files
+
+For known structures where you define the schema inline:
+
+```typescript
+import { dcpEncode } from "dcp-wrap";
+
+const dcp = dcpEncode(results, {
+  id: "engram-recall:v1",
+  fields: ["id", "relevance", "summary", "tags", "hitCount", "weight", "status"],
+});
+// ["$S","engram-recall:v1","id","relevance","summary","tags","hitCount","weight","status"]
+// ["abc123",0.95,"port conflict fix","docker,gotcha",12,3.2,"fixed"]
+```
+
+Array fields are auto-joined with comma. Use `transform` for custom handling:
+
+```typescript
+const dcp = dcpEncode(records, schema, {
+  transform: { relevance: (v) => +(v as number).toFixed(3) },
+});
+```
+
+### Full — schema generation + encoding
+
+For unknown JSON where you want schema inference:
+
 ```typescript
 import { SchemaGenerator, DcpEncoder, DcpSchema, FieldMapping } from "dcp-wrap";
 
-// Infer schema from samples
 const gen = new SchemaGenerator();
 const draft = gen.fromSamples(jsonRecords, { domain: "github-pr" });
 
-// Encode
 const schema = new DcpSchema(draft.schema);
 const mapping = new FieldMapping(draft.mapping);
 const encoder = new DcpEncoder(schema, mapping);
 
 const batch = encoder.encode(jsonRecords);
 console.log(DcpEncoder.toString(batch));
-// ["$S","github-pr:v1","id","state","author","title"]
-// ["pr-1","open","alice","Fix auth"]
-// ["pr-2","merged","bob","Add tests"]
 ```
 
 ## Nested JSON

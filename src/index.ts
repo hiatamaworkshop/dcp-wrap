@@ -1,7 +1,8 @@
 export { DcpSchema } from "./schema.js";
 export { FieldMapping, resolvePath, flattenKeys } from "./mapping.js";
 export { SchemaGenerator, formatReport } from "./generator.js";
-export { DcpEncoder } from "./encoder.js";
+export { DcpEncoder, dcpEncode } from "./encoder.js";
+export type { InlineSchema } from "./encoder.js";
 export type {
   DcpSchemaDef,
   FieldTypeDef,

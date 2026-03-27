@@ -1,6 +1,55 @@
 import { DcpSchema } from "./schema.js";
 import { FieldMapping } from "./mapping.js";
-import type { EncodedBatch } from "./types.js";
+import type { DcpSchemaDef, EncodedBatch } from "./types.js";
+
+/** Inline schema for dcpEncode — no files, no generator. */
+export interface InlineSchema {
+  id: string;
+  fields: string[];
+}
+
+/**
+ * One-step DCP encode. No schema file, no generator, no mapping.
+ * For known structures where fields match source keys directly.
+ *
+ * Arrays are auto-joined with comma. Use transform for custom handling.
+ *
+ * @example
+ * ```ts
+ * const dcp = dcpEncode(results, {
+ *   id: "engram-recall:v1",
+ *   fields: ["id", "relevance", "summary", "tags", "hitCount", "weight", "status"],
+ * });
+ * // → header + rows as newline-separated string
+ * ```
+ */
+export function dcpEncode(
+  records: Record<string, unknown>[],
+  schema: InlineSchema,
+  options?: { transform?: Record<string, (v: unknown) => unknown> },
+): string {
+  if (records.length === 0) return "";
+
+  const { id, fields } = schema;
+  const transforms = options?.transform ?? {};
+
+  const header = JSON.stringify(["$S", id, ...fields]);
+  const rows = records.map((record) => {
+    const row = fields.map((f) => {
+      const raw = record[f] ?? null;
+      if (transforms[f]) {
+        return transforms[f](raw);
+      }
+      if (Array.isArray(raw)) {
+        return raw.join(",") || "-";
+      }
+      return raw;
+    });
+    return JSON.stringify(row);
+  });
+
+  return [header, ...rows].join("\n");
+}
 
 export class DcpEncoder {
   private readonly schema: DcpSchema;
