@@ -26,11 +26,23 @@
 - Out-of-process: JSON-RPC over stdio → Node.js/dcp-wrap 直結
 - PicoClaw: Go製, 26K stars, MCP native, v0.2.4
 
+## 完了ステップ (2026-03-28)
+1. ✓ PicoClaw ソースから JSON-RPC ペイロード形式を確認
+   - ToolResultHookResponse: { meta, tool, arguments, result: { for_llm, for_user, silent, is_error }, duration }
+   - レスポンス: { action: "modify", result: { ...modified payload } }
+2. ✓ after_tool hook で dcp-wrap を呼ぶ外部プロセスを実装 → src/picoclaw-hook.ts
+   - hook.hello / hook.after_tool ハンドラ
+   - 明示スキーマ (id + fields) と "auto" (SchemaGenerator) の両対応
+   - PICOCLAW_DCP_TOOLS env で tool→schema マッピング設定
+3. ✓ テスト 6/6 通過 (picoclaw-hook.test.ts)
+   - hello, passthrough, DCP encode, error passthrough, non-JSON passthrough, auto-schema
+4. ✓ PicoClaw config 例 → examples/picoclaw-config.json
+
 ## 次のステップ
-1. PicoClaw ソースから JSON-RPC ペイロード形式を確認
-2. after_tool hook で dcp-wrap を呼ぶ外部プロセスを実装
-3. MCP ツール結果の DCP 変換を実証
-4. before/after token 数の比較データを取得
+1. PicoClaw 実機で動作確認 (Telegram bot 経由)
+2. before/after token 数の比較データを取得
+3. before_llm hook でコントローラ注入 (output DCP 化)
+4. after_llm hook で Cap + Decode (messaging channel 向け)
 
 ## 関連リポジトリ
 - github.com/hiatamaworkshop/dcp-wrap

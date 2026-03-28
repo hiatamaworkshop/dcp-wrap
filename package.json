@@ -6,7 +6,8 @@
   "main": "dist/index.js",
   "types": "dist/index.d.ts",
   "bin": {
-    "dcp-wrap": "dist/cli.js"
+    "dcp-wrap": "dist/cli.js",
+    "dcp-picoclaw-hook": "dist/picoclaw-hook.js"
   },
   "exports": {
     ".": {
