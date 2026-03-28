@@ -264,6 +264,157 @@ PicoClaw                          dcp-wrap hook (Node.js)
 }
 ```
 
+## Why PicoClaw, not OpenClaw
+
+We evaluated both frameworks for DCP integration. PicoClaw is the clear choice.
+
+### OpenClaw: skill/prompt-level DCP constraints don't work
+
+OpenClaw's architecture makes hook-level interception impractical:
+
+- **Built-in prompts override skill prompts.** DCP formatting instructions added via skills or custom prompts are silently overridden by OpenClaw's internal system prompt. The LLM never sees the DCP constraint.
+- **No output hooks.** OpenClaw has no `after_tool` equivalent. There is no way to intercept tool results before they reach the LLM. This is tracked as [OpenClaw #12914](https://github.com/openclaw/openclaw) but unimplemented as of March 2026.
+- **Plugin architecture is input-only.** OpenClaw plugins can modify the system prompt but cannot intercept or transform tool output.
+
+Bottom line: without output hooks, DCP encoding at the tool result boundary is impossible in OpenClaw.
+
+### PicoClaw: 4 modifiable hooks = complete DCP pipeline
+
+PicoClaw's hook system was designed for exactly this kind of interception:
+
+| Hook | DCP role | Status |
+|---|---|---|
+| `after_tool` | Encode tool JSON → DCP positional arrays | **Implemented** |
+| `before_llm` | Inject output controller ("respond as DCP") | Planned |
+| `after_llm` | Cap non-conforming output + decode for messaging | Planned |
+| `before_tool` | (Optional) Tool argument optimization | Not needed |
+
+Key advantages:
+- **Out-of-process hooks** via JSON-RPC over stdio — any language works, no Go port needed
+- **Modifiable responses** — hooks can rewrite tool results, not just observe them
+- **Per-tool selectivity** — DCP encode only configured tools, everything else passes through
+- **Edge device focus** — PicoClaw targets Raspberry Pi and resource-constrained hardware where token cost is a real constraint, not theoretical
+
+### Practical comparison
+
+| | OpenClaw | PicoClaw |
+|---|---|---|
+| Hook system | No output hooks | 4 modifiable hooks |
+| Tool result interception | Impossible | `after_tool` with modify |
+| DCP encoding | Not feasible | Working (dcp-wrap hook) |
+| LLM output control | Prompt-level only (overridden) | `before_llm` injection |
+| External process hooks | Not supported | JSON-RPC over stdio |
+| Token cost sensitivity | Cloud-focused | Edge-device-focused |
+
+## Rate limits and tool count
+
+PicoClaw sends all tool definitions to the LLM on every turn. With MCP servers, tool count can grow quickly:
+
+| Configuration | Tool count | ~Input tokens per turn |
+|---|---|---|
+| Default (built-in only) | 14 | ~8K |
+| + 1 MCP server (6 tools) | 20 | ~15K |
+| + skills, multiple MCP servers | 30+ | ~25K+ |
+
+On Anthropic's free/low-tier plans (50K input tokens/min), a single multi-iteration turn with 20+ tools can hit rate limits. Mitigations:
+
+1. **Disable unused tools** — Set `"enabled": false` for tools you don't need (exec, read_file, write_file, spawn, subagent, skills)
+2. **Clear session history** — Delete `data/sessions/` to reset accumulated context
+3. **Limit iterations** — Set `max_tool_iterations` lower (e.g., 5)
+4. **Use a higher-tier API plan** — More headroom for agentic loops
+
+This is actually where `before_llm` DCP encoding of ToolDefinition[] would have the highest impact — compressing 20+ tool schemas that ship on every single turn.
+
+## Real-world results: engram MCP integration
+
+### The problem with naive after_tool encoding
+
+The initial approach — intercept JSON tool results in `after_tool` and DCP-encode them — hit a fundamental issue: **most tool output is not JSON**.
+
+| Tool | Output format | DCP encodable? |
+|---|---|---|
+| web_search (DuckDuckGo) | Plain text (`"Results for: ..."`) | No |
+| web_fetch | Single JSON object, `text` field dominates | ~0% reduction |
+| read_file, exec, list_dir | Plain text | No |
+| cron (list) | Plain text (`"Scheduled jobs:\n- ..."`) | No |
+| **MCP tools (engram_pull)** | **Depends on output mode** | **Yes, with the right approach** |
+
+Even engram's MCP server returns human-readable text by default:
+```
+Found 10 results for "DCP" (cross-project):
+[1] DCP formatter placement: OUT-side...
+    hits=2 weight=-2.58 status=recent relevance=0.345
+    tags: why, dcp, formatter, architecture
+    id: a7b5dce9-...
+```
+
+This is 5649 chars for 10 results. Not JSON, so the after_tool hook passes it through unchanged.
+
+### The solution: before_tool parameter injection
+
+engram's MCP server already supports a `queryType` parameter:
+- `queryType: "human"` (default) — verbose natural language
+- `queryType: "agent"` — DCP positional arrays with `$S` header
+
+The problem: PicoClaw's LLM doesn't know to pass `queryType: "agent"`. It uses whatever parameters it decides on.
+
+The fix: **use `before_tool` to inject `queryType: "agent"` before the MCP call executes**.
+
+```typescript
+// In picoclaw-hook.ts
+const AGENT_QUERY_TOOLS = new Set(["mcp_engram_engram_pull", "mcp_engram_engram_ls"]);
+
+function handleBeforeTool(params: unknown): unknown {
+  const payload = params as ToolCallPayload;
+  if (AGENT_QUERY_TOOLS.has(payload.tool)) {
+    return {
+      action: "modify",
+      call: {
+        ...payload,
+        arguments: { ...payload.arguments, queryType: "agent" },
+      },
+    };
+  }
+  return { action: "continue" };
+}
+```
+
+This is transparent to the LLM — it calls `engram_pull` normally, the hook injects the parameter, engram returns DCP, and the LLM reads compact positional arrays.
+
+### Measured results
+
+```
+before_tool: injecting queryType=agent for mcp_engram_engram_pull
+Tool call: mcp_engram_engram_pull({"crossProject":true,"limit":10,"query":"DCP","queryType":"agent"})
+Tool execution completed | result_length=1697 | tool=mcp_engram_engram_pull
+```
+
+| | Human format | DCP format | Reduction |
+|---|---|---|---|
+| engram_pull (10 results) | 5649 chars | 1697 chars | **70%** |
+| LLM iterations to answer | 3 | 2 | **-33%** |
+
+The LLM correctly interprets the DCP `$S` header and positional rows, extracting the same information from 70% fewer tokens.
+
+### Key insight: two-hook pattern
+
+The effective pattern is not `after_tool` alone, but **`before_tool` + `after_tool` working together**:
+
+1. **`before_tool`**: Inject parameters that tell the MCP server to return compact format
+2. **`after_tool`**: Available as fallback for tools that don't have a compact mode (auto-encode JSON via SchemaGenerator)
+
+This avoids the fundamental problem of trying to parse and re-encode text that was never JSON in the first place.
+
+### Difficulties encountered during integration
+
+**engram MCP dist was stale.** The `dcp-format.ts` source existed but `dist/dcp-format.js` did not — the MCP server had never been rebuilt after adding DCP output support. The hook injected `queryType: "agent"` correctly, the MCP server received it, but the import of `formatRecallDcp` failed silently and fell through to the human format codepath. Always rebuild MCP servers before copying dist into Docker.
+
+**MCP tool naming convention.** PicoClaw prefixes MCP tools with `mcp_{serverName}_{toolName}`. For server `engram` and tool `engram_pull`, the full name is `mcp_engram_engram_pull` — not `mcp_engram_pull`. This affects both the DCP_TOOLS config and the AGENT_QUERY_TOOLS set.
+
+**Environment variable naming.** engram's MCP server uses `GATEWAY_URL`, not `ENGRAM_GATEWAY_URL`. The first attempt used the wrong name, causing `Cannot reach http://localhost:3100` errors inside the container (the default fallback).
+
+**Rate limits with many tools.** PicoClaw sends all tool definitions on every LLM turn. With 6 MCP tools + 14 built-in tools = 20 tools, a multi-iteration turn can exceed Anthropic's 50K input tokens/min limit. Disabling unused tools (exec, file I/O, skills, spawn) reduced the count from 21 to 11 and resolved the issue.
+
 ## Next steps
 
 - [DCP Specification](https://dcp-docs.pages.dev/dcp/specification) — full protocol design

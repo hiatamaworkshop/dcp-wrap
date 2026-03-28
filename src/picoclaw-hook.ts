@@ -201,6 +201,35 @@ function handleAfterTool(params: unknown): unknown {
   };
 }
 
+// Tools where we inject queryType=agent to get DCP output from the MCP server directly
+const AGENT_QUERY_TOOLS = new Set(["mcp_engram_engram_pull", "mcp_engram_engram_ls"]);
+
+interface ToolCallPayload {
+  meta: Record<string, unknown>;
+  tool: string;
+  arguments?: Record<string, unknown>;
+  channel?: string;
+  chat_id?: string;
+}
+
+function handleBeforeTool(params: unknown): unknown {
+  const payload = params as ToolCallPayload;
+  if (AGENT_QUERY_TOOLS.has(payload.tool)) {
+    log(`before_tool: injecting queryType=agent for ${payload.tool}`);
+    return {
+      action: "modify",
+      call: {
+        ...payload,
+        arguments: {
+          ...payload.arguments,
+          queryType: "agent",
+        },
+      },
+    };
+  }
+  return { action: "continue" };
+}
+
 function handleRequest(method: string, params: unknown): unknown {
   log(`RPC: ${method}`);
   switch (method) {
@@ -209,6 +238,7 @@ function handleRequest(method: string, params: unknown): unknown {
     case "hook.after_tool":
       return handleAfterTool(params);
     case "hook.before_tool":
+      return handleBeforeTool(params);
     case "hook.before_llm":
     case "hook.after_llm":
     case "hook.approve_tool":
