@@ -2,29 +2,19 @@
 /**
  * PicoClaw DCP Hook — out-of-process JSON-RPC over stdio.
  *
- * Intercepts `after_tool` and DCP-encodes tool results to reduce tokens.
- * Configured via PICOCLAW_DCP_TOOLS env var (JSON) or config passed at hello.
+ * Two-hook pattern:
+ *   before_tool — injects queryType=agent for MCP tools with DCP output mode
+ *   after_tool  — DCP-encodes JSON tool results (fallback for tools without native DCP)
  *
- * Usage:
- *   node dist/picoclaw-hook.js
- *
- * Config (picoclaw config.json):
+ * Config via PICOCLAW_DCP_TOOLS env (JSON):
  *   {
- *     "hooks": {
- *       "enabled": true,
- *       "processes": {
- *         "dcp_encoder": {
- *           "enabled": true,
- *           "transport": "stdio",
- *           "command": ["node", "path/to/dcp-wrap/dist/picoclaw-hook.js"],
- *           "intercept": ["after_tool"],
- *           "env": {
- *             "PICOCLAW_DCP_TOOLS": "{\"mcp_engram_pull\":{\"id\":\"engram-recall:v1\",\"fields\":[\"id\",\"relevance\",\"summary\",\"tags\",\"hitCount\",\"weight\",\"status\"]}}"
- *           }
- *         }
- *       }
- *     }
+ *     "mcp_engram_engram_pull": { "id": "engram-recall:v1", "fields": [...] },
+ *     "web_fetch": "auto"
  *   }
+ *
+ * Config via PICOCLAW_DCP_AGENT_TOOLS env (comma-separated):
+ *   Tools where before_tool injects queryType=agent.
+ *   Example: "mcp_engram_engram_pull,mcp_engram_engram_ls"
  */
 
 import { createInterface } from "node:readline";
@@ -65,9 +55,18 @@ interface ToolResultPayload {
   chat_id?: string;
 }
 
+interface ToolCallPayload {
+  meta: Record<string, unknown>;
+  tool: string;
+  arguments?: Record<string, unknown>;
+  channel?: string;
+  chat_id?: string;
+}
+
 // --- State ---
 
 let toolsConfig: ToolsConfig = {};
+let agentQueryTools = new Set<string>();
 const autoSchemaCache = new Map<string, InlineSchema>();
 
 // --- Config loading ---
@@ -78,8 +77,13 @@ function loadConfig(): void {
     try {
       toolsConfig = JSON.parse(envTools);
     } catch {
-      log(`Failed to parse PICOCLAW_DCP_TOOLS: ${envTools}`);
+      log(`Failed to parse PICOCLAW_DCP_TOOLS`);
     }
+  }
+
+  const envAgent = process.env.PICOCLAW_DCP_AGENT_TOOLS;
+  if (envAgent) {
+    agentQueryTools = new Set(envAgent.split(",").map((s) => s.trim()).filter(Boolean));
   }
 }
 
@@ -104,9 +108,6 @@ function sendError(id: number, code: number, message: string): void {
 // --- DCP encoding ---
 
 function tryParseJSON(text: string): unknown[] | null {
-  // Tool output may be JSON array or JSON object or text.
-  // Try to parse as JSON. If it's an array of objects, return it.
-  // If it's a single object, wrap in array.
   try {
     const parsed = JSON.parse(text);
     if (Array.isArray(parsed)) {
@@ -135,7 +136,6 @@ function encodeToolResult(toolName: string, forLlm: string): string | null {
     return encodeAuto(toolName, records as Record<string, unknown>[]);
   }
 
-  // Explicit schema
   const schema: InlineSchema = { id: config.id, fields: config.fields };
   return dcpEncode(records as Record<string, unknown>[], schema);
 }
@@ -144,7 +144,6 @@ function encodeAuto(toolName: string, records: Record<string, unknown>[]): strin
   let schema = autoSchemaCache.get(toolName);
 
   if (!schema) {
-    // Generate schema from first batch
     const gen = new SchemaGenerator();
     const draft: SchemaDraft = gen.fromSamples(records, {
       domain: toolName,
@@ -153,7 +152,7 @@ function encodeAuto(toolName: string, records: Record<string, unknown>[]): strin
     });
     schema = { id: draft.schema.id, fields: draft.schema.fields };
     autoSchemaCache.set(toolName, schema);
-    log(`Auto-generated schema for ${toolName}: ${schema.fields.join(",")}`);
+    log(`auto-schema ${toolName}: ${schema.fields.join(",")}`);
   }
 
   return dcpEncode(records, schema);
@@ -165,80 +164,56 @@ function handleHello(_params: Record<string, unknown>): unknown {
   return { ok: true, name: "dcp-encoder" };
 }
 
-function handleAfterTool(params: unknown): unknown {
-  const payload = params as ToolResultPayload;
-  const toolName = payload.tool;
-  const result = payload.result;
-
-  log(`after_tool: tool=${toolName} has_result=${!!result} for_llm_len=${result?.for_llm?.length ?? 0}`);
-
-  if (!result || result.is_error || !result.for_llm) {
-    log(`after_tool: skipping (no result or error)`);
-    return { action: "continue" };
-  }
-
-  const encoded = encodeToolResult(toolName, result.for_llm);
-  if (!encoded) {
-    log(`after_tool: no encoding (not JSON or not configured). Preview: ${result.for_llm.slice(0, 300)}`);
-    return { action: "continue" };
-  }
-
-  const originalLen = result.for_llm.length;
-  const encodedLen = encoded.length;
-  const reduction = ((1 - encodedLen / originalLen) * 100).toFixed(0);
-  log(`${toolName}: ${originalLen} → ${encodedLen} chars (${reduction}% reduction)`);
-
-  // Return modified result
-  return {
-    action: "modify",
-    result: {
-      ...payload,
-      result: {
-        ...result,
-        for_llm: encoded,
-      },
-    },
-  };
-}
-
-// Tools where we inject queryType=agent to get DCP output from the MCP server directly
-const AGENT_QUERY_TOOLS = new Set(["mcp_engram_engram_pull", "mcp_engram_engram_ls"]);
-
-interface ToolCallPayload {
-  meta: Record<string, unknown>;
-  tool: string;
-  arguments?: Record<string, unknown>;
-  channel?: string;
-  chat_id?: string;
-}
-
 function handleBeforeTool(params: unknown): unknown {
   const payload = params as ToolCallPayload;
-  if (AGENT_QUERY_TOOLS.has(payload.tool)) {
-    log(`before_tool: injecting queryType=agent for ${payload.tool}`);
+  if (agentQueryTools.has(payload.tool)) {
     return {
       action: "modify",
       call: {
         ...payload,
-        arguments: {
-          ...payload.arguments,
-          queryType: "agent",
-        },
+        arguments: { ...payload.arguments, queryType: "agent" },
       },
     };
   }
   return { action: "continue" };
 }
 
+function handleAfterTool(params: unknown): unknown {
+  const payload = params as ToolResultPayload;
+  const toolName = payload.tool;
+  const result = payload.result;
+
+  if (!result || result.is_error || !result.for_llm) {
+    return { action: "continue" };
+  }
+
+  const encoded = encodeToolResult(toolName, result.for_llm);
+  if (!encoded) {
+    return { action: "continue" };
+  }
+
+  const originalLen = result.for_llm.length;
+  const encodedLen = encoded.length;
+  const pct = ((1 - encodedLen / originalLen) * 100).toFixed(0);
+  log(`${toolName}: ${originalLen}→${encodedLen} (${pct}%)`);
+
+  return {
+    action: "modify",
+    result: {
+      ...payload,
+      result: { ...result, for_llm: encoded },
+    },
+  };
+}
+
 function handleRequest(method: string, params: unknown): unknown {
-  log(`RPC: ${method}`);
   switch (method) {
     case "hook.hello":
       return handleHello((params ?? {}) as Record<string, unknown>);
-    case "hook.after_tool":
-      return handleAfterTool(params);
     case "hook.before_tool":
       return handleBeforeTool(params);
+    case "hook.after_tool":
+      return handleAfterTool(params);
     case "hook.before_llm":
     case "hook.after_llm":
     case "hook.approve_tool":
@@ -252,7 +227,10 @@ function handleRequest(method: string, params: unknown): unknown {
 
 function main(): void {
   loadConfig();
-  log(`Started. Tools configured: ${Object.keys(toolsConfig).join(", ") || "(none — use PICOCLAW_DCP_TOOLS env)"}`);
+
+  const dcpTools = Object.keys(toolsConfig);
+  const agentTools = [...agentQueryTools];
+  log(`dcp=${dcpTools.join(",") || "none"} agent=${agentTools.join(",") || "none"}`);
 
   const rl = createInterface({ input: process.stdin });
 
@@ -263,11 +241,9 @@ function main(): void {
     try {
       msg = JSON.parse(line);
     } catch {
-      log(`Failed to parse: ${line.slice(0, 100)}`);
       return;
     }
 
-    // Notification (no id) — ignore
     if (!msg.id) return;
 
     try {
