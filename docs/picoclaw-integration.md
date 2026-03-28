@@ -415,6 +415,71 @@ This avoids the fundamental problem of trying to parse and re-encode text that w
 
 **Rate limits with many tools.** PicoClaw sends all tool definitions on every LLM turn. With 6 MCP tools + 14 built-in tools = 20 tools, a multi-iteration turn can exceed Anthropic's 50K input tokens/min limit. Disabling unused tools (exec, file I/O, skills, spawn) reduced the count from 21 to 11 and resolved the issue.
 
+## For MCP server authors: why your server should speak DCP
+
+This integration proved one thing clearly: **DCP cannot be bolted on from outside.** A hook sitting between the tool and the LLM can only work with what the tool gives it. If the tool returns plain text, there is nothing to compress.
+
+### The plain text problem
+
+Most tools — web_search, exec, read_file, cron, list_dir — return plain text for a good reason: maximum compatibility. Any LLM can read text. No schema knowledge required.
+
+But this "compatibility" has a cost. When an MCP tool returns 10 structured records as formatted text:
+
+```
+[1] DCP formatter placement: OUT-side...
+    hits=2 weight=-2.58 status=recent relevance=0.345
+    tags: why, dcp, formatter, architecture
+    id: a7b5dce9-...
+```
+
+Every field label (`hits=`, `weight=`, `status=`, `tags:`, `id:`) is repeated per record. For 10 records, that's 10x the overhead. The LLM reads all of it, pays for all of it, and extracts the same information that a positional array conveys in a fraction of the tokens.
+
+### What MCP servers should do
+
+Add a `queryType` parameter (or equivalent) to your tool schema:
+
+```typescript
+server.tool("my_tool", {
+  query: z.string(),
+  queryType: z.enum(["human", "agent"]).optional()
+    .describe("'agent' returns DCP compact format. Default: 'human'."),
+}, async ({ query, queryType }) => {
+  const results = await fetchResults(query);
+
+  if (queryType === "agent") {
+    // DCP positional arrays — 70% fewer tokens
+    return { content: [{ type: "text", text: dcpEncode(results, schema) }] };
+  }
+
+  // Human-readable text — default, compatible with everything
+  return { content: [{ type: "text", text: formatHuman(results) }] };
+});
+```
+
+This is the contract. The MCP tool declares it can speak DCP. The consumer (LLM, hook, agent framework) decides whether to ask for it.
+
+### Why this matters
+
+Without this contract:
+- Hooks can only observe text, not compress it
+- Every agent framework must implement its own parsing for every tool's text format
+- Token costs scale linearly with verbosity
+
+With this contract:
+- A `before_tool` hook injects `queryType: "agent"` once
+- The MCP server returns DCP natively — no parsing, no re-encoding
+- 70% token reduction, measured and proven
+- The human format remains the default — nothing breaks for consumers that don't know DCP
+
+The MCP protocol already provides the mechanism: typed parameters via tool schemas. DCP doesn't require a new protocol — it requires MCP servers to **offer a compact output mode** and consumers to **ask for it**.
+
+### The pattern for any MCP server
+
+1. **Keep human format as default.** Backward compatible. Text works everywhere.
+2. **Add `queryType: "agent"` parameter.** Declare the compact mode exists.
+3. **Return DCP when asked.** Use [dcp-wrap](https://github.com/hiatamaworkshop/dcp-wrap) or format positional arrays directly.
+4. **Let hooks handle the switching.** Agent frameworks inject the parameter automatically — the LLM never needs to learn about it.
+
 ## Next steps
 
 - [DCP Specification](https://dcp-docs.pages.dev/dcp/specification) — full protocol design
