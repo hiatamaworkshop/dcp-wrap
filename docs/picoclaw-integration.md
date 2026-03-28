@@ -480,6 +480,67 @@ The MCP protocol already provides the mechanism: typed parameters via tool schem
 3. **Return DCP when asked.** Use [dcp-wrap](https://github.com/hiatamaworkshop/dcp-wrap) or format positional arrays directly.
 4. **Let hooks handle the switching.** Agent frameworks inject the parameter automatically — the LLM never needs to learn about it.
 
+## Scheduled tasks and DCP: where it applies
+
+PicoClaw has two schedulers: **cron** (user-defined jobs) and **heartbeat** (periodic `HEARTBEAT.md` check). Whether DCP applies depends on the execution path.
+
+### Execution paths
+
+| Scheduler | Mode | Flow | DCP applies? |
+|---|---|---|---|
+| Cron | `deliver=false` (default) | Message → LLM turn → LLM calls tools → response | **Yes** — tools go through hooks |
+| Cron | `deliver=true` | Message → direct to Telegram | No — LLM not involved |
+| Cron | `command` set | Shell exec → output to Telegram | No — LLM not involved |
+| Heartbeat | — | HEARTBEAT.md → LLM turn → LLM calls tools → response | **Yes** — same as cron deliver=false |
+
+The key: cron `deliver=false` and heartbeat both start an LLM turn via `ProcessDirectWithChannel`. The LLM decides which tools to call. Those tool calls go through `before_tool` (parameter injection) and `after_tool` (encoding fallback) — the same DCP pipeline as interactive messages.
+
+### What this means in practice
+
+A heartbeat task like "Check engram for new knowledge about DCP" triggers:
+
+```
+Heartbeat tick (every 30 min)
+  → LLM reads HEARTBEAT.md task list
+  → LLM calls mcp_engram_engram_pull(query="DCP")
+  → before_tool injects queryType=agent     ← DCP kicks in here
+  → engram returns 1697 chars (not 5649)    ← 70% saved
+  → LLM summarizes and sends to Telegram
+```
+
+Every 30 minutes, 70% fewer tokens per engram query. Over a day, that compounds.
+
+### Input-side DCP: the before_llm frontier
+
+The current implementation handles **tool output** (after_tool) and **tool parameters** (before_tool). But the largest token cost is on the **input side** — what gets sent to the LLM on every single turn:
+
+| Input component | Sent every turn | Approximate tokens | DCP potential |
+|---|---|---|---|
+| Tool definitions (12+ tools) | Yes | ~4K-8K | **High** — repeated structured schemas |
+| Conversation history | Yes | Grows over time | **High** — message[] with repeated structure |
+| System prompt | Yes (cached by LLM) | ~2K | Low — already prefix-cached |
+| User message | Yes | Small | None — natural language |
+
+The `before_llm` hook can intercept the full `LLMHookRequest` including `messages[]` and `tools[]`. Compressing tool definitions from verbose JSON Schema to DCP positional format could save 50%+ on every turn — but this requires the LLM to understand DCP tool schemas, which is unverified territory.
+
+This is the next frontier. The tool output side is solved. The input side is where the remaining cost lives.
+
+### Guidance for task authors
+
+When writing `HEARTBEAT.md` tasks or cron job messages, structure them so the LLM calls MCP tools (which benefit from DCP) rather than built-in text tools:
+
+```markdown
+## Good — triggers MCP tool with DCP benefit
+- Check engram for recent knowledge about deployment issues
+- Search engram for error patterns from this week
+
+## Less effective — triggers text-output tools
+- Run `df -h` and report disk usage
+- Fetch https://status.example.com and summarize
+```
+
+The former triggers `engram_pull` → DCP encoding → 70% savings. The latter triggers `exec` or `web_fetch` → plain text → no DCP benefit.
+
 ## Next steps
 
 - [DCP Specification](https://dcp-docs.pages.dev/dcp/specification) — full protocol design
