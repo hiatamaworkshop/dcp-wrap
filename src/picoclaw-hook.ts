@@ -170,12 +170,16 @@ function handleAfterTool(params: unknown): unknown {
   const toolName = payload.tool;
   const result = payload.result;
 
+  log(`after_tool: tool=${toolName} has_result=${!!result} for_llm_len=${result?.for_llm?.length ?? 0}`);
+
   if (!result || result.is_error || !result.for_llm) {
+    log(`after_tool: skipping (no result or error)`);
     return { action: "continue" };
   }
 
   const encoded = encodeToolResult(toolName, result.for_llm);
   if (!encoded) {
+    log(`after_tool: no encoding (not JSON or not configured). Preview: ${result.for_llm.slice(0, 300)}`);
     return { action: "continue" };
   }
 
@@ -198,6 +202,7 @@ function handleAfterTool(params: unknown): unknown {
 }
 
 function handleRequest(method: string, params: unknown): unknown {
+  log(`RPC: ${method}`);
   switch (method) {
     case "hook.hello":
       return handleHello((params ?? {}) as Record<string, unknown>);
