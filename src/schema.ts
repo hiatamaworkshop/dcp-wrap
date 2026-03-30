@@ -8,6 +8,8 @@ export class DcpSchema {
   readonly fields: string[];
   readonly fieldCount: number;
   readonly types: Record<string, FieldTypeDef>;
+  /** Full definition including nestSchemas. */
+  readonly def: DcpSchemaDef;
 
   constructor(def: DcpSchemaDef) {
     this.id = def.id;
@@ -15,6 +17,7 @@ export class DcpSchema {
     this.fields = [...def.fields];
     this.fieldCount = def.fieldCount;
     this.types = { ...def.types };
+    this.def = def;
   }
 
   /** Bitmask with all field bits set. */

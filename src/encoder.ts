@@ -1,6 +1,6 @@
 import { DcpSchema } from "./schema.js";
 import { FieldMapping } from "./mapping.js";
-import type { DcpSchemaDef, EncodedBatch } from "./types.js";
+import type { EncodedBatch } from "./types.js";
 
 /** Inline schema for dcpEncode — no files, no generator. */
 export interface InlineSchema {
@@ -95,9 +95,12 @@ export class DcpEncoder {
     const headerArr = this.schema.sHeader(mask);
     const header = JSON.stringify(headerArr);
 
-    // Build rows
+    // Build rows (nested arrays use $R references)
     const rows = resolvedBatch.map((resolved) => {
-      const row = activeFields.map((f) => resolved[f] ?? null);
+      const row = activeFields.map((f) => {
+        const val = resolved[f] ?? null;
+        return this.encodeFieldValue(f, val);
+      });
       return JSON.stringify(row);
     });
 
@@ -107,13 +110,47 @@ export class DcpEncoder {
   /** Encode a single record, returning just the positional array. */
   encodeOne(record: Record<string, unknown>): unknown[] {
     const resolved = this.mapping.resolve(record);
-    return this.schema.fields.map((f) => resolved[f] ?? null);
+    return this.schema.fields.map((f) => this.encodeFieldValue(f, resolved[f] ?? null));
   }
 
   /** Render encoded batch as a string (header + rows, newline-separated). */
   static toString(batch: EncodedBatch): string {
     if (!batch.header) return "";
     return [batch.header, ...batch.rows].join("\n");
+  }
+
+  /**
+   * Encode a single field value.
+   * If nestSchemas has a sub-schema for this field:
+   *   Array-of-objects → ["$R", schemaId, ...rows]
+   *   Empty array → ["$R", schemaId] (no rows)
+   * Otherwise → pass through
+   */
+  private encodeFieldValue(fieldName: string, value: unknown): unknown {
+    const nest = this.schema.def.nestSchemas?.[fieldName];
+    if (!nest) return value;
+
+    if (!Array.isArray(value)) return value;
+
+    const subSchema = new DcpSchema(nest.schema);
+    const sid = subSchema.id;
+
+    if (value.length === 0) {
+      return ["$R", sid];
+    }
+
+    // Check items are objects
+    if (!value.every((item) => typeof item === "object" && item !== null && !Array.isArray(item))) {
+      return value;
+    }
+
+    const subMapping = new FieldMapping(nest.mapping);
+    const subEncoder = new DcpEncoder(subSchema, subMapping);
+    const subBatch = subEncoder.encode(value as Record<string, unknown>[]);
+    if (!subBatch.header) return ["$R", sid];
+
+    const rowArrs = subBatch.rows.map((r: string) => JSON.parse(r));
+    return ["$R", sid, ...rowArrs];
   }
 
   private detectMask(resolvedBatch: Record<string, unknown>[]): number {

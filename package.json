@@ -1,6 +1,6 @@
 {
   "name": "dcp-wrap",
-  "version": "0.2.0",
+  "version": "0.3.0",
   "description": "Convert JSON to DCP positional-array format for AI agents — 40-70% token reduction",
   "type": "module",
   "main": "dist/index.js",

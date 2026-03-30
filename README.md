@@ -123,6 +123,89 @@ Nested objects are automatically flattened via dot-notation:
 
 The generator maps `metadata.author` → `author`, `metadata.state` → `state`. The mapping file records the full paths for encoding.
 
+## Nested DCP (array-of-objects)
+
+Arrays of objects are encoded using **`$R` references** — the sub-schema is stored in the schema definition (`nestSchemas`), and the output references it by ID without repeating the header.
+
+```json
+[
+  {"id": "u001", "name": "Alice", "teams": [{"id": "t01", "name": "Infra", "role": "lead"}, {"id": "t02", "name": "Security", "role": "member"}]},
+  {"id": "u002", "name": "Bob",   "teams": [{"id": "t03", "name": "Frontend", "role": "member"}]},
+  {"id": "u003", "name": "Charlie", "teams": []}
+]
+```
+
+Becomes:
+
+```
+["$S","user:v1","id","name","teams"]
+["u001","Alice",["$R","user.teams:v1",["t01","Infra","lead"],["t02","Security","member"]]]
+["u002","Bob",["$R","user.teams:v1",["t03","Frontend","member"]]]
+["u003","Charlie",["$R","user.teams:v1"]]
+```
+
+The sub-schema structure lives in the schema definition file:
+
+```json
+{
+  "$dcp": "schema",
+  "id": "user:v1",
+  "fields": ["id", "name", "teams"],
+  "nestSchemas": {
+    "teams": {
+      "schema": { "$dcp": "schema", "id": "user.teams:v1", "fields": ["id", "name", "role"], ... },
+      "mapping": { "schemaId": "user.teams:v1", "paths": { "id": "id", "name": "name", "role": "role" } }
+    }
+  }
+}
+```
+
+The `$R` convention:
+- `["$R", "schema-id", [row1], [row2], ...]` — array with rows
+- `["$R", "schema-id"]` — empty array (no rows)
+
+### Design: static vs dynamic approach
+
+Two approaches were evaluated for nested DCP encoding:
+
+**Dynamic (inline `$S` preamble)** — sub-schema headers emitted at the top of each output:
+
+```
+["$S","user.teams:v1","id","name","role"]         ← preamble: sub-schema declaration
+["$S","user:v1","id","name","teams"]              ← main header
+["u001","Alice",["$R","user.teams:v1",...]]        ← $R references preamble
+```
+
+Pros: self-contained output, no schema file needed for decoding. Cons: preamble overhead at small N; schema declared per-output rather than per-tool.
+
+**Static (`nestSchemas` in schema definition)** — sub-schemas stored in the cached schema, output carries only `$R` references:
+
+```
+["$S","user:v1","id","name","teams"]
+["u001","Alice",["$R","user.teams:v1",...]]
+```
+
+Pros: no per-output overhead, schema cache is the single source of truth, round-trip serializable. Cons: consumer must have access to the schema definition to resolve `$R`.
+
+**Chosen: static.** The gateway already caches schemas per tool. Storing `nestSchemas` there is the natural fit — infer once on first call, encode with `$R` on all subsequent calls. The dynamic approach remains valid for standalone/streaming use cases where the consumer has no schema cache.
+
+### Compression characteristics
+
+| Records | JSON-only baseline | Flat DCP (no nesting) | Nested DCP (`$R`) |
+|---------|-------------------|----------------------|-------------------|
+| 3       | 0%                | ~25%                 | ~23%              |
+| 10      | 0%                | ~27%                 | ~28%              |
+| 30      | 0%                | ~28%                 | ~32%              |
+| 100     | 0%                | ~30%                 | ~33%              |
+
+At low record counts `$R` + schema-id overhead is slightly larger than repeating raw keys. At 10+ records the crossover occurs. The primary advantage is **consistency** (no JSON/DCP mixed format) and **LLM readability** (tested: Haiku 4.5 decodes nested `$R` structures with 10/10 accuracy on positional extraction tasks).
+
+### Known limitations
+
+1. **Sparse sub-fields**: When nested objects have heterogeneous keys (e.g. API responses with variable `metadata`), sub-schemas produce many nullable columns. Current mitigation: `maxDepth: 0` for sub-schemas keeps variable objects as opaque JSON.
+2. **`$R` requires schema context**: Unlike inline `$S`, the `$R` reference is only meaningful if the consumer has the `nestSchemas` definition. For the gateway use case this is always true (schema is cached). For standalone output, the dynamic preamble approach may be preferable.
+3. **Empty arrays**: `["$R", "schema-id"]` with no trailing rows. Correct behavior — zero rows, schema ID preserved for type information.
+
 ## Working with messy data
 
 Real-world APIs return deeply nested objects, inconsistent fields, and dozens of keys you don't need. The generator applies three guards by default:

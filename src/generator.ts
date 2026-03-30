@@ -1,5 +1,6 @@
 import type {
   DcpSchemaDef,
+  NestSchemaDef,
   FieldTypeDef,
   FieldReport,
   SchemaDraft,
@@ -57,6 +58,15 @@ function classifyField(name: string, values: unknown[]): Category {
     if (uniqueRatio < 0.3) return "classifier";
   }
   return "other";
+}
+
+/** Check if a value is a homogeneous array of objects (candidate for nested DCP). */
+function isArrayOfObjects(values: unknown[]): boolean {
+  const nonNull = values.filter((v) => v != null);
+  if (nonNull.length === 0) return false;
+  return nonNull.every(
+    (v) => Array.isArray(v) && v.length > 0 && v.every((item) => typeof item === "object" && item !== null && !Array.isArray(item)),
+  );
 }
 
 function inferType(values: unknown[]): FieldTypeDef {
@@ -135,8 +145,23 @@ export class SchemaGenerator {
     const includeSet = options.include ? new Set(options.include) : null;
     const fieldNames = options.fieldNames ?? {};
     const maxDepth = options.maxDepth ?? 3;
-    const maxFields = options.maxFields ?? 20;
+    const maxFields = options.maxFields ?? Infinity;
     const minPresence = options.minPresence ?? 0.1;
+
+    // Step 0.5: Detect array-of-objects fields (before flattening)
+    const arrayObjectFields = new Map<string, Record<string, unknown>[][]>();
+    for (const sample of samples) {
+      for (const [key, value] of Object.entries(sample)) {
+        if (
+          Array.isArray(value) &&
+          value.length > 0 &&
+          value.every((item) => typeof item === "object" && item !== null && !Array.isArray(item))
+        ) {
+          if (!arrayObjectFields.has(key)) arrayObjectFields.set(key, []);
+          arrayObjectFields.get(key)!.push(value as Record<string, unknown>[]);
+        }
+      }
+    }
 
     // Step 1: Flatten and collect per-path values
     const pathValues = new Map<string, unknown[]>();
@@ -204,13 +229,26 @@ export class SchemaGenerator {
     }
 
     // Step 4: Deduplicate field names
-    const seenNames = new Map<string, number>();
+    // Use the full source path (dot-separated) as prefix for disambiguation
+    // e.g. user.url → user_url, milestone.url → milestone_url
+    const seenNames = new Set<string>();
     for (const field of analyzed) {
-      const count = seenNames.get(field.schemaName) ?? 0;
-      if (count > 0) {
-        field.schemaName = `${field.schemaName}_${count}`;
+      if (seenNames.has(field.schemaName)) {
+        // Use parent path segments as prefix to disambiguate
+        const parts = field.sourcePath.split(".");
+        if (parts.length > 1) {
+          field.schemaName = `${parts[parts.length - 2]}_${parts[parts.length - 1]}`;
+        }
+        // If still colliding, append incrementing suffix
+        let candidate = field.schemaName;
+        let i = 2;
+        while (seenNames.has(candidate)) {
+          candidate = `${field.schemaName}_${i}`;
+          i++;
+        }
+        field.schemaName = candidate;
       }
-      seenNames.set(field.schemaName, count + 1);
+      seenNames.add(field.schemaName);
     }
 
     // Step 5: Build schema and mapping
@@ -220,9 +258,32 @@ export class SchemaGenerator {
     const paths: Record<string, string> = {};
     const fieldReports: FieldReport[] = [];
 
+    const nestSchemas: Record<string, NestSchemaDef> = {};
+
     for (const f of analyzed) {
       types[f.schemaName] = f.typeInfo;
       paths[f.schemaName] = f.sourcePath;
+
+      // Generate sub-schema for array-of-objects fields → nestSchemas
+      const aoSamples = arrayObjectFields.get(f.sourcePath);
+      if (aoSamples && aoSamples.length > 0) {
+        const allItems = aoSamples.flat();
+        if (allItems.length > 0) {
+          const subGen = new SchemaGenerator();
+          const subDraft = subGen.fromSamples(allItems, {
+            domain: `${domain}.${f.schemaName}`,
+            version,
+            maxDepth: 0, // sub-schemas: top-level only, nested objects stay as JSON
+            maxFields,
+            minPresence,
+          });
+          types[f.schemaName] = { ...f.typeInfo, type: "array" };
+          nestSchemas[f.schemaName] = {
+            schema: subDraft.schema,
+            mapping: subDraft.mapping,
+          };
+        }
+      }
 
       const nonNull = f.values.filter((v) => v != null);
       const uniqueCount = new Set(nonNull.map(String)).size;
@@ -251,6 +312,7 @@ export class SchemaGenerator {
       fields,
       fieldCount: fields.length,
       types,
+      ...(Object.keys(nestSchemas).length > 0 ? { nestSchemas } : {}),
     };
 
     const mapping: FieldMappingDef = { schemaId, paths };

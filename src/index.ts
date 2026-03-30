@@ -7,6 +7,7 @@ export type { InlineSchema } from "./encoder.js";
 export type { DecodeResult, TemplateMap } from "./decoder.js";
 export type {
   DcpSchemaDef,
+  NestSchemaDef,
   FieldTypeDef,
   FieldMappingDef,
   GenerateOptions,

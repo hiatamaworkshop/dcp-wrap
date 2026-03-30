@@ -15,6 +15,14 @@ export interface DcpSchemaDef {
   fields: string[];
   fieldCount: number;
   types: Record<string, FieldTypeDef>;
+  /** Nested sub-schemas for array-of-objects fields. Key = field name. */
+  nestSchemas?: Record<string, NestSchemaDef>;
+}
+
+/** Sub-schema + mapping pair for a nested array-of-objects field. */
+export interface NestSchemaDef {
+  schema: DcpSchemaDef;
+  mapping: FieldMappingDef;
 }
 
 /** Mapping: schema field name → dot.notation.path in source. */
