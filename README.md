@@ -244,12 +244,6 @@ const draft = gen.fromSamples(samples, {
 
 dcp-wrap handles JSON → DCP conversion. For shadow index optimization, agent profiling, and the full protocol design, see [dcp-docs.pages.dev](https://dcp-docs.pages.dev).
 
-## PicoClaw Integration
-
-dcp-wrap ships with an out-of-process hook for [PicoClaw](https://github.com/sipeed/picoclaw) that DCP-encodes tool results before they reach the LLM. No core modification needed — just configure a process hook.
-
-See [docs/picoclaw-integration.md](docs/picoclaw-integration.md) for setup guide, Docker instructions, and gotchas.
-
 ## License
 
 Apache-2.0
