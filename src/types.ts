@@ -7,6 +7,44 @@ export interface FieldTypeDef {
   max?: number;
 }
 
+/**
+ * Validation shadow — independent verification lens attached to a schema.
+ * Shadows are disposable: removing one does not affect the body or other shadows.
+ * Bound to schemaId; if the schema ID changes, this shadow is invalid.
+ */
+export interface ValidationShadow {
+  /** Schema this shadow is bound to. Must match DcpSchemaDef.id exactly. */
+  schemaId: string;
+  /** Per-field constraints, keyed by field name. Unrecognized fields are passed through. */
+  fields?: Record<string, ValidationShadowField>;
+}
+
+/** Per-field constraint set for a validation shadow. */
+export interface ValidationShadowField {
+  /** Regex pattern the value must match (string fields). */
+  pattern?: string;
+  /** Maximum string length. */
+  maxLength?: number;
+  /** Minimum string length. */
+  minLength?: number;
+}
+
+/**
+ * Routing shadow — declarative distribution control attached to a schema.
+ * Declares who receives data and under what conditions.
+ * Bound to schemaId; system reads and executes, does not own the logic.
+ */
+export interface RoutingShadow {
+  /** Schema this shadow is bound to. Must match DcpSchemaDef.id exactly. */
+  schemaId: string;
+  /** Minimum agent density level required (L0–L4). */
+  minLevel?: number;
+  /** Group-level access control. */
+  access?: string[];
+  /** Field-value conditions for inclusion. */
+  filter?: Record<string, unknown[]>;
+}
+
 /** DCP schema definition (the $dcp JSON document). */
 export interface DcpSchemaDef {
   $dcp: "schema";
@@ -17,6 +55,15 @@ export interface DcpSchemaDef {
   types: Record<string, FieldTypeDef>;
   /** Nested sub-schemas for array-of-objects fields. Key = field name. */
   nestSchemas?: Record<string, NestSchemaDef>;
+  /**
+   * Shadows attached to this schema definition.
+   * Each shadow is independently disposable — attach one, some, or all.
+   * All shadows are bound to this schema's id; id change = shadows invalid.
+   */
+  shadows?: {
+    validation?: ValidationShadow;
+    routing?: RoutingShadow;
+  };
 }
 
 /** Sub-schema + mapping pair for a nested array-of-objects field. */

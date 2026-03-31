@@ -185,4 +185,3 @@ With the `queryType` contract:
 
 - [DCP Specification](https://dcp-docs.pages.dev/dcp/specification) — full protocol design
 - [dcp-wrap](https://github.com/hiatamaworkshop/dcp-wrap) — encoder/decoder library + CLI
-- [PicoClaw integration](./picoclaw-integration.md) — framework-specific hook setup
