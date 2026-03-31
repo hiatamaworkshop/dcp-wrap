@@ -1,5 +1,7 @@
 # dcp-wrap
 
+[![SafeSkill 96/100](https://img.shields.io/badge/SafeSkill-96%2F100_Verified%20Safe-brightgreen)](https://safeskill.dev/scan/hiatamaworkshop-dcp-wrap)
+
 Convert JSON to [DCP](https://dcp-docs.pages.dev) positional-array format — fewer tokens, same accuracy.
 
 ## What it does
