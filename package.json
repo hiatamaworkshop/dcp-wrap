@@ -1,13 +1,12 @@
 {
   "name": "dcp-wrap",
-  "version": "0.3.0",
+  "version": "0.3.1",
   "description": "Convert JSON to DCP positional-array format for AI agents — 40-70% token reduction",
   "type": "module",
   "main": "dist/index.js",
   "types": "dist/index.d.ts",
   "bin": {
-    "dcp-wrap": "dist/cli.js",
-    "dcp-picoclaw-hook": "dist/picoclaw-hook.js"
+    "dcp-wrap": "dist/cli.js"
   },
   "exports": {
     ".": {
@@ -22,7 +21,15 @@
     "prepublishOnly": "npm run test"
   },
   "files": [
-    "dist",
+    "dist/*.js",
+    "dist/*.js.map",
+    "dist/*.d.ts",
+    "!dist/*.test.js",
+    "!dist/*.test.js.map",
+    "!dist/*.test.d.ts",
+    "!dist/picoclaw-hook.js",
+    "!dist/picoclaw-hook.js.map",
+    "!dist/picoclaw-hook.d.ts",
     "README.md",
     "docs"
   ],
@@ -43,8 +50,8 @@
     "tokens",
     "mcp",
     "positional-array",
-    "picoclaw",
-    "hook"
+    "schema",
+    "compression"
   ],
   "license": "Apache-2.0"
 }
