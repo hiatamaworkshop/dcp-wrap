@@ -95,7 +95,7 @@ export class DcpEncoder {
     const headerArr = this.schema.sHeader(mask);
     const header = JSON.stringify(headerArr);
 
-    // Build rows (nested arrays use $R references)
+    // Build rows (nested arrays use $N references)
     const rows = resolvedBatch.map((resolved) => {
       const row = activeFields.map((f) => {
         const val = resolved[f] ?? "-";
@@ -122,8 +122,8 @@ export class DcpEncoder {
   /**
    * Encode a single field value.
    * If nestSchemas has a sub-schema for this field:
-   *   Array-of-objects → ["$R", schemaId, ...rows]
-   *   Empty array → ["$R", schemaId] (no rows)
+   *   Array-of-objects → ["$N", schemaId, ...rows]
+   *   Empty array → ["$N", schemaId] (no rows)
    * Otherwise → pass through
    */
   private encodeFieldValue(fieldName: string, value: unknown): unknown {
@@ -136,7 +136,7 @@ export class DcpEncoder {
     const sid = subSchema.id;
 
     if (value.length === 0) {
-      return ["$R", sid];
+      return ["$N", sid];
     }
 
     // Check items are objects
@@ -147,10 +147,10 @@ export class DcpEncoder {
     const subMapping = new FieldMapping(nest.mapping);
     const subEncoder = new DcpEncoder(subSchema, subMapping);
     const subBatch = subEncoder.encode(value as Record<string, unknown>[]);
-    if (!subBatch.header) return ["$R", sid];
+    if (!subBatch.header) return ["$N", sid];
 
     const rowArrs = subBatch.rows.map((r: string) => JSON.parse(r));
-    return ["$R", sid, ...rowArrs];
+    return ["$N", sid, ...rowArrs];
   }
 
   private detectMask(resolvedBatch: Record<string, unknown>[]): number {

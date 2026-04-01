@@ -124,11 +124,11 @@ describe("Nested DCP Encoding", () => {
     const teamsIdx = mainHeader.indexOf("teams") - 2;
     const teamsVal = aliceRow[teamsIdx];
 
-    // teams: ["$R", "search_users.teams:v1", [row1], [row2]]
+    // teams: ["$N", "search_users.teams:v1", [row1], [row2]]
     assert.ok(Array.isArray(teamsVal), "teams should be array");
-    assert.equal(teamsVal[0], "$R", "nested field starts with $R");
-    assert.ok(teamsVal[1].startsWith("search_users.teams:"), "$R references sub-schema ID");
-    assert.equal(teamsVal.length, 4, "$R + schemaId + 2 team rows");
+    assert.equal(teamsVal[0], "$N", "nested field starts with $N");
+    assert.ok(teamsVal[1].startsWith("search_users.teams:"), "$N references sub-schema ID");
+    assert.equal(teamsVal.length, 4, "$N + schemaId + 2 team rows");
     assert.ok(Array.isArray(teamsVal[2]), "team row 1 is an array");
   });
 
@@ -147,11 +147,11 @@ describe("Nested DCP Encoding", () => {
     const charlieRow = JSON.parse(lines[3]);
     const teamsIdx = mainHeader.indexOf("teams") - 2;
 
-    // Empty → ["$R", "search_users.teams:v1"]
+    // Empty → ["$N", "search_users.teams:v1"]
     const teamsVal = charlieRow[teamsIdx];
     assert.ok(Array.isArray(teamsVal), "empty teams should be array");
-    assert.equal(teamsVal[0], "$R", "starts with $R");
-    assert.equal(teamsVal.length, 2, "$R + schemaId only, no rows");
+    assert.equal(teamsVal[0], "$N", "starts with $N");
+    assert.equal(teamsVal.length, 2, "$N + schemaId only, no rows");
   });
 
   it("nestSchemas persist in schema JSON (serializable)", () => {
@@ -174,7 +174,7 @@ describe("Nested DCP Encoding", () => {
     const row = JSON.parse(lines[1]);
     const header = JSON.parse(lines[0]);
     const teamsIdx = header.indexOf("teams") - 2;
-    assert.equal(row[teamsIdx][0], "$R", "$R works after schema round-trip");
+    assert.equal(row[teamsIdx][0], "$N", "$N works after schema round-trip");
   });
 
   it("produces smaller output than JSON", () => {

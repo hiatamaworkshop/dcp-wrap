@@ -154,19 +154,19 @@ The gateway never breaks a response. If encoding fails or the response isn't JSO
 
 ### Nested DCP encoding
 
-The encoder converts array-of-objects fields using `$R` references. Sub-schemas are stored in the schema cache as `nestSchemas`, not repeated in every output:
+The encoder converts array-of-objects fields using `$N` references. Sub-schemas are stored in the schema cache as `nestSchemas`, not repeated in every output:
 
 ```
 ["$S","search_users:v1","id","name","role","teams","recent_activity"]
 ["u001","Alice","admin",
-  ["$R","search_users.teams:v1",
+  ["$N","search_users.teams:v1",
    ["t01","Infrastructure","lead"],
    ["t02","Security","member"]],
-  ["$R","search_users.recent_activity:v1",
+  ["$N","search_users.recent_activity:v1",
    ["deploy",{"env":"production","version":"2.1.0"},"api-v2","2026-03-28T14:30:00Z"]]]
 ["u003","Charlie","user",
-  ["$R","search_users.teams:v1"],
-  ["$R","search_users.recent_activity:v1"]]
+  ["$N","search_users.teams:v1"],
+  ["$N","search_users.recent_activity:v1"]]
 ```
 
 The schema cache entry for `search_users` contains the full `nestSchemas`:
@@ -184,11 +184,11 @@ The schema cache entry for `search_users` contains the full `nestSchemas`:
 
 This fits the gateway's existing flow naturally:
 1. **Phase 1** (first call): `SchemaGenerator.fromSamples()` infers root schema + `nestSchemas` → cached together
-2. **Phase 2** (subsequent): `DcpEncoder` reads `nestSchemas` from the cached schema → emits `$R` references
+2. **Phase 2** (subsequent): `DcpEncoder` reads `nestSchemas` from the cached schema → emits `$N` references
 
 Key design decisions:
 - **Sub-schema depth is capped at 0** (top-level fields only within nested objects). Heterogeneous nested objects (e.g. variable `metadata` keys) stay as opaque JSON to avoid sparse column explosion.
-- **Empty arrays** → `["$R", "schema-id"]` with no rows. Type information preserved via schema ID.
+- **Empty arrays** → `["$N", "schema-id"]` with no rows. Type information preserved via schema ID.
 - **Static vs dynamic**: The gateway uses static `nestSchemas` (stored in cache). A dynamic alternative (inline `$S` preamble before the main header) was also implemented and may be useful for standalone/streaming scenarios where no schema cache exists.
 
 ## Transport
