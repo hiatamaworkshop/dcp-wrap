@@ -36,7 +36,7 @@ export function dcpEncode(
   const header = JSON.stringify(["$S", id, ...fields]);
   const rows = records.map((record) => {
     const row = fields.map((f) => {
-      const raw = record[f] ?? null;
+      const raw = record[f] ?? "-";
       if (transforms[f]) {
         return transforms[f](raw);
       }
@@ -98,7 +98,7 @@ export class DcpEncoder {
     // Build rows (nested arrays use $R references)
     const rows = resolvedBatch.map((resolved) => {
       const row = activeFields.map((f) => {
-        const val = resolved[f] ?? null;
+        const val = resolved[f] ?? "-";
         return this.encodeFieldValue(f, val);
       });
       return JSON.stringify(row);
@@ -110,7 +110,7 @@ export class DcpEncoder {
   /** Encode a single record, returning just the positional array. */
   encodeOne(record: Record<string, unknown>): unknown[] {
     const resolved = this.mapping.resolve(record);
-    return this.schema.fields.map((f) => this.encodeFieldValue(f, resolved[f] ?? null));
+    return this.schema.fields.map((f) => this.encodeFieldValue(f, resolved[f] ?? "-"));
   }
 
   /** Render encoded batch as a string (header + rows, newline-separated). */
