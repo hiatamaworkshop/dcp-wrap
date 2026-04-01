@@ -50,7 +50,7 @@ export class DcpSchema {
     const m = mask ?? this.fullMask;
     const active = this.fieldsFromMask(m);
     const sid = this.cutdownId(m);
-    return ["$S", sid, ...active];
+    return ["$S", sid, active.length, ...active];
   }
 
   /** Validate a positional array against this schema. Returns error messages. */

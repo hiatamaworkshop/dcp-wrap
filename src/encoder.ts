@@ -33,7 +33,7 @@ export function dcpEncode(
   const { id, fields } = schema;
   const transforms = options?.transform ?? {};
 
-  const header = JSON.stringify(["$S", id, ...fields]);
+  const header = JSON.stringify(["$S", id, fields.length, ...fields]);
   const rows = records.map((record) => {
     const row = fields.map((f) => {
       const raw = record[f] ?? "-";
