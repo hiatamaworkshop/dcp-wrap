@@ -233,6 +233,8 @@ body 変換:  SemanticEncoder（dict → positional array のみ、shadow に関
 
 SemanticEncoder は body row の変換だけを担う。shadow_level は Gateway が決定し、ShadowEmitter が実行する。Encoder に shadow の責務を混ぜない。
 
+**現状の実装について:** `$S` 生成は現在 SemanticEncoder 内に同居している。`$V`/`$P`/`$ST`/`$O` が未実装のため ShadowEmitter を切り出す動機が薄い。複数シャドウの協調が必要になった時点で分離する。
+
 ### $S ヘッダ各要素の必要性
 
 ```
