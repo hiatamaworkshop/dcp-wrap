@@ -90,6 +90,24 @@ range check:         ["$V","event:v1",*,int:0-30000]
 regex pattern:       ["$V","log:v1",/ISO8601/,*,*,*]
 ```
 
+### Null representation
+
+DCP rows are positional arrays. Omitting a field shifts all subsequent positions — never acceptable. `null` fills the slot but carries JSON-era semantics and costs extra tokens unnecessarily.
+
+**Convention: use `-` for absent values.**
+
+```
+["2026-03-29","ERROR","gateway", -]
+```
+
+`-` is a single token, unambiguous in log and CSV tradition, and readable by LLMs without inference. When a field may be absent, declare it in `$V`:
+
+```
+["$V","log:v1", iso8601, enum(ERROR|WARN|INFO), string, string:nullable:-]
+```
+
+Without a `$V` declaration, `-` is still valid as a positional placeholder — the consumer treats it as absent. With `$V`, the intent is explicit and machine-checkable.
+
 Because DCP rows are fixed-length and line-independent:
 
 - Field count check requires no parsing — delimiter counting
