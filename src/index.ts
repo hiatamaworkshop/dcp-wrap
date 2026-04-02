@@ -15,3 +15,8 @@ export type {
   SchemaDraft,
   FieldReport,
 } from "./types.js";
+
+export { SchemaRegistry } from "./registry.js";
+export { VShadow, vShadowFromSchema } from "./validator.js";
+export type { RegistryEntry } from "./registry.js";
+export type { VConstraint, VFieldResult, VRowResult } from "./validator.js";
