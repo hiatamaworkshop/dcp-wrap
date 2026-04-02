@@ -80,8 +80,16 @@ function inferType(values: unknown[]): FieldTypeDef {
   const typeSet = new Set<string>();
   for (const v of nonNull) {
     if (typeof v === "boolean") typeSet.add("boolean");
-    else if (typeof v === "number") typeSet.add("number");
+    else if (typeof v === "number") {
+      // Separate int from float at detection time
+      typeSet.add(Number.isInteger(v) ? "int" : "number");
+    }
     else typeSet.add("string"); // fallback
+  }
+
+  // Mixed int+float → promote all to number
+  if (typeSet.has("int") && typeSet.has("number")) {
+    typeSet.delete("int");
   }
 
   const types = [...typeSet].sort();
@@ -91,7 +99,7 @@ function inferType(values: unknown[]): FieldTypeDef {
     type: types.length === 1 ? types[0] : types,
   };
 
-  // Enum detection
+  // Enum detection (string fields only)
   if (typeSet.has("string") && typeSet.size === 1) {
     const unique = [...new Set(nonNull as string[])].sort();
     if (unique.length >= 2 && unique.length <= 10 && unique.length <= nonNull.length * 0.6) {
@@ -99,7 +107,7 @@ function inferType(values: unknown[]): FieldTypeDef {
     }
   }
 
-  // Numeric range detection
+  // Numeric range detection — float only (int = flags/counts, no range assumption)
   if (typeSet.has("number") && typeSet.size === 1) {
     const nums = nonNull as number[];
     const lo = Math.min(...nums);
@@ -108,6 +116,14 @@ function inferType(values: unknown[]): FieldTypeDef {
       result.min = 0;
       result.max = 1;
     } else if (lo >= 0) {
+      result.min = 0;
+    }
+  }
+
+  // int: only attach min:0 if all values are non-negative (no upper bound assumed)
+  if (typeSet.has("int") && typeSet.size === 1) {
+    const nums = nonNull as number[];
+    if (Math.min(...nums) >= 0) {
       result.min = 0;
     }
   }
