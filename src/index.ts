@@ -20,3 +20,8 @@ export { SchemaRegistry } from "./registry.js";
 export { VShadow, vShadowFromSchema } from "./validator.js";
 export type { RegistryEntry } from "./registry.js";
 export type { VConstraint, VFieldResult, VRowResult } from "./validator.js";
+
+export { Gate } from "./gate.js";
+export { SimpleMonitor, NullMonitor } from "./monitor.js";
+export type { GateOptions, GateResult, ValidationMode } from "./gate.js";
+export type { Monitor, PipelineMessage, MessageType, FlowPayload, VResultPayload } from "./monitor.js";
