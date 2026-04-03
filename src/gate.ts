@@ -82,6 +82,7 @@ export class Gate {
     row: unknown[],
     index: number,
     mode?: ValidationMode,
+    ts?: number,
   ): GateResult {
     const slot = this.resolveSlot(schemaId);
 
@@ -113,7 +114,8 @@ export class Gate {
     this.monitor.emit({
       type: "vResult",
       schemaId,
-      ts: Date.now(),
+      ts: ts ?? Date.now(),
+      priority: vResult.pass ? "batch" : "immediate",
       payload,
     });
 

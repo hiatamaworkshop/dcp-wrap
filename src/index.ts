@@ -22,6 +22,9 @@ export type { RegistryEntry } from "./registry.js";
 export type { VConstraint, VFieldResult, VRowResult } from "./validator.js";
 
 export { Gate } from "./gate.js";
-export { SimpleMonitor, NullMonitor } from "./monitor.js";
+export { SimpleMonitor, NullMonitor, PooledMonitor, MessagePool } from "./monitor.js";
 export type { GateOptions, GateResult, ValidationMode } from "./gate.js";
-export type { Monitor, PipelineMessage, MessageType, FlowPayload, VResultPayload } from "./monitor.js";
+export type { Monitor, PipelineMessage, MessageType, MessagePriority, FlowPayload, VResultPayload, Messenger, MessengerFilter } from "./monitor.js";
+
+export { StCollector } from "./st-collector.js";
+export type { StWindow, StRow, StCollectorOptions } from "./st-collector.js";

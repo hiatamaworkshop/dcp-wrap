@@ -7,8 +7,12 @@ composable components. Each component has a single responsibility. Components
 communicate through a shared message bus rather than direct coupling.
 
 ```
-[Source]
+[Raw Source]
   JSON file / DCP stream / live feed
+       ↓
+[Preprocessor]     (pre-pipeline — normalization, field audit, type coercion)
+       ↓
+[Clean Source]
        ↓
 [Encoder]          (optional — JSON sources only)
        ↓
@@ -20,6 +24,26 @@ communicate through a shared message bus rather than direct coupling.
 
 All components → [Monitor] → subscribers ($ST, $R, agents)
 ```
+
+**Design principle: the pipeline accepts clean data only.**
+
+The Preprocessor is not part of the pipeline. It is an upstream stage that
+prepares data before it enters the pipeline boundary. The pipeline itself
+assumes structurally valid, schema-conformant input.
+
+Responsibilities belong strictly to each stage:
+
+| Stage | Responsibility |
+|-------|----------------|
+| Preprocessor | Field audit, type coercion, nesting flatten, anomaly decision |
+| Pipeline (Encoder→Gate) | Schema encoding, validation, routing, monitoring |
+
+Anything that would require the pipeline to handle unknown fields, mixed types,
+or missing values is a preprocessing concern. The pipeline should not
+defensively handle what the preprocessor should have resolved.
+
+This separation keeps the pipeline fast, stateless with respect to source
+quirks, and independently testable against well-formed data.
 
 ---
 
@@ -60,17 +84,34 @@ Converts JSON records to DCP positional rows.
 
 ### Streamer
 
-Moves rows from source to Gate. Tracks schema context and flow rate.
+**Transport layer.** Streamer moves rows from source to Gate. It has no
+knowledge of what the data means — no validation, no routing, no schema
+inference.
 
-- Detects `$S` headers to track current schemaId
+**What Streamer does:**
+
+- Reads lines from file or stdin, writes to stdout (pass-through)
+- Detects `$S` headers to track current `schemaId`
+- Attaches `cachedTs` timestamp to each row (updated by interval, not per-row syscall)
 - Maintains a **time window** (rolling N-second count per schemaId)
-- Emits `flow` messages to Monitor when rate crosses thresholds
-- Has no knowledge of validation or routing logic
+- Emits `flow` messages to Monitor when window closes
+- `--pre-check` / InitialGate: samples N rows before streaming begins, fails early if schema violations found
+
+**What Streamer does not do:**
+
+- Row-by-row validation → Gate's responsibility
+- Schema inference / field normalization → Preprocessor's responsibility
+- JSON reshaping / type coercion → Preprocessor's responsibility
+- Routing decisions → `$R` / RoutingLayer
+
+With Preprocessor in place, Streamer receives clean, schema-conformant data
+and has no reason to inspect row content. It is a pure transport stage.
 
 ```
 Streamer state:
   currentSchemaId: string
-  window: Map<schemaId, RollingCounter>
+  window: Map<schemaId, { count: number, windowStart: number }>
+  cachedTs: number   — refreshed every tsResolutionMs (default 100ms)
 ```
 
 Multiple Streamers can connect in sequence. Each operates on the same
@@ -78,7 +119,8 @@ registry and the same Monitor instance.
 
 ### Gate
 
-Applies shadow evaluation to each row. Routes output based on results.
+Applies shadow evaluation to each row. **Gate does not route.** It pushes
+to the MessagePool and moves on. Routing is the $R layer's responsibility.
 
 **Slot model:**
 
@@ -92,35 +134,126 @@ Streamer `flow` messages inform Gate when to promote a schema to a fixed slot.
 **Validation modes (`$V`):**
 
 ```
-filter    PASS → downstream   FAIL → dropped
-flag      PASS → downstream   FAIL → downstream (Monitor notified)
-isolate   PASS → dropped      FAIL → downstream
+filter    PASS → MessagePool (batch)    FAIL → MessagePool (immediate)
+flag      PASS → MessagePool (batch)    FAIL → MessagePool (immediate)
+isolate   PASS → dropped               FAIL → MessagePool (immediate)
 ```
 
-Mode is declared in the `$V` shadow attached to the schema.
+Mode affects whether PASS rows enter the pool at all. Downstream routing
+is determined entirely by the $R layer after pool delivery.
 
 **Gate processing per row:**
 
 ```
 1. lookup schemaId → slot (O(1))
 2. run compiled $V function array
-3. emit vResult to Monitor
-4. route by mode + $R conditions
+3. push vResult to MessagePool (priority: immediate on FAIL, batch on PASS)
+   ← done. Gate does not decide where the row goes next.
 ```
 
-Gate knows nothing about what is downstream. It routes to an interface,
-not a concrete consumer.
+**Gate push contract:**
+
+Gate does not buffer. Gate does not manage timers. Gate does not route.
+Gate only decides *priority* when handing off to the MessagePool:
+
+```
+PASS → pool.push(payload, priority: "batch")
+FAIL → pool.push(payload, priority: "immediate")
+```
+
+The MessagePool owns all buffering and flush logic. Gate's responsibility
+is: judge the row, indicate urgency, move on.
+
+---
+
+### MessagePool + Messenger
+
+The MessagePool decouples Gate (and other emitters) from subscribers.
+Gate fires and forgets. Delivery timing is the Pool's concern.
+
+```
+Gate ──push(priority)──→ [MessagePool]
+Streamer ──────────────→ [MessagePool]
+                               ↓
+                         Messenger(s)
+                         (windowed poll or immediate flush)
+                               ↓
+              ┌────────────────┼──────────────────┐
+         $ST collector      $R layer          Brain AI
+         (統計集計)         (routing)          (観測のみ)
+```
+
+**Pool internals:**
+
+```
+batchQueue:     VResultPayload[]   — flushed on window boundary (e.g. 100ms)
+immediateQueue: VResultPayload[]   — flushed on next tick
+```
+
+On `priority: "immediate"`, the Pool flushes the immediate queue without
+waiting for the window. Batch queue drains on schedule.
+
+**Messenger filtering:**
+
+Each Messenger declares the message types and priority levels it consumes.
+Subscribers receive only what they need:
+
+| Messenger / Subscriber | Consumes | Notes |
+|------------------------|----------|-------|
+| $ST collector | `vResult` (all) | pass + fail counts for window stats |
+| $R layer | `vResult` (PASS) | schemaId → dest lookup, downstream write |
+| Brain AI | `st` | $ST summaries only, read-only observation |
+| Slot manager | `flow`, `promote` | Gate fixed-slot management |
+
+Adding a subscriber = adding a Messenger. Gate and Pool are unchanged.
+
+### $R layer
+
+The $R layer is the sole routing authority. It receives rows from the
+MessagePool (via Messenger) and dispatches them to downstream destinations
+based on a routing table keyed by `schemaId`.
+
+```
+MessagePool
+  → $R layer
+      routing table:
+        "user:v1"   → Pipeline B stdin
+        "event:v1"  → Pipeline C stdin
+        "error:v1"  → dead letter queue
+        *           → default downstream
+```
+
+Multiple schemas coexist in the same pipeline. The $R layer handles each
+`schemaId` independently — no coordination needed at the Gate level.
+
+The routing table is **mutable at runtime**: Brain AI can update it
+asynchronously via `PipelineControl.updateRouting()`. The change takes
+effect on the next row delivered, with no pipeline interruption.
+
+```ts
+interface RoutingLayer {
+  ingest(msg: PipelineMessage): void          // called by Messenger
+  setTable(table: RoutingTable): void         // called by Brain AI (async)
+  setProfile(agentId: string, profile: AgentProfile): void
+}
+
+type RoutingTable = Map<string, string | string[]>  // schemaId → destId(s)
+```
+
+The $R layer is independent of MessagePool internals. It can be driven by
+MessagePool, a direct call, or a future inter-process bus.
 
 ### Monitor
 
-The pipeline observer. Receives messages from all components via a simple
-emit interface. Distributes to subscribers.
+The Monitor interface is retained as the public API for emitters.
+Internally, `Monitor.emit()` is a thin wrapper over `MessagePool.push()`.
 
 ```ts
 interface PipelineMessage {
   type: "flow" | "vResult" | "promote" | "schema_loaded"
   schemaId: string
   ts: number
+  priority?: "immediate" | "batch"   // new — set by Gate on FAIL
   payload: unknown
 }
 
@@ -130,20 +263,8 @@ interface Monitor {
 }
 ```
 
-Components only know the `Monitor` interface. Subscribers are decoupled
-from emitters.
-
-**Built-in subscribers:**
-
-| Subscriber | Message types consumed | Purpose |
-|------------|----------------------|---------|
-| $ST collector | `vResult`, `flow` | Aggregate pass/fail stats per window |
-| $R router | `vResult`, `flow` | Adjust routing based on stream state |
-| Slot manager | `flow`, `promote` | Promote/demote Gate fixed slots |
-| Brain agent | any | Receive FAIL rows, $ST summaries for interpretation |
-
-Subscribers are registered at startup. Adding a new agent means adding a
-subscriber — no changes to Streamer or Gate.
+Components only know the `Monitor` interface. The Pool/Messenger layer
+is an implementation detail behind it.
 
 ---
 
@@ -197,20 +318,123 @@ Gate B handles semantic filtering (flags, domain-specific rules) and routing.
 
 ---
 
+## Brain AI — pipeline control principle
+
+**AI must never enter the data pipeline.**
+
+Inference is slow and non-deterministic. The pipeline is fast and
+deterministic. Mixing them would make inference a bottleneck and break
+the pipeline's latency guarantees.
+
+### Observation → inference → control chain
+
+```
+[Pipeline]
+  Streamer → Gate → MessagePool
+                         ↓
+                    $ST collector
+                    ["$ST", schemaId, pass, fail, total, rate, window]
+                         ↓
+                   [Lightweight Analyzer]   ← fast, rule-based or small model
+                    interprets $ST trends, detects anomalies
+                         ↓
+                   $I packet (inference result)
+                    { schemaId, signal, severity, context: $ST row }
+                         ↓
+                   [$I pool]   ← async buffer, Brain AI reads at its own pace
+                         ↓
+                   [Brain AI]   ← slow, evaluates across schemas and time
+                         ↓
+                   decision (details TBD — see below)
+                         ↓
+                   [Control Channel]   ← only intervention point
+                         ↓
+                   PipelineControl interface
+```
+
+The Lightweight Analyzer acts as a buffer between the fast pipeline and
+the slow Brain AI. $ST collection is never blocked by inference latency.
+
+### What Brain AI may and may not do
+
+| Operation | Permitted | Reason |
+|-----------|-----------|--------|
+| Update routing table ($R) | ✓ | async, control channel only |
+| Swap agent pool entry | ✓ | async, non-blocking |
+| Update agent profile | ✓ | async, non-blocking |
+| Stop / throttle pipeline | ✓ | sends control signal, does not block stream |
+| Row-level routing decision | ✗ | inference latency would bottleneck the pipeline |
+| Data transformation / $O shaping | ✗ | pipeline-internal, must be deterministic |
+| Intervene in vResult | ✗ | Gate's responsibility, AI does not touch |
+
+### $R and Brain AI are separate
+
+```
+$R (lightweight, deterministic):
+  reads routing table → routes rows → fast, in-pipeline
+
+Brain AI (slow, probabilistic):
+  evaluates $I packets → rewrites routing table / agent profiles → async, out-of-pipeline
+```
+
+$R is not the Brain's executor. It is the Brain's **configuration target**.
+
+### Brain AI control targets (design — under discussion)
+
+The Brain AI controls the system by updating configuration, not by touching
+data. Exact targets are not yet fully defined, but current candidates:
+
+**Routing table (`$R`)**
+- schemaId → destination mapping
+- Brain updates when it detects degradation, anomaly patterns, or load imbalance
+- Change takes effect on the next row, no pipeline interruption
+
+**Agent profiles**
+- Each downstream agent has a profile (capabilities, capacity, schema affinity)
+- Brain can swap or reconfigure agents in the agent pool
+- How profiles map to routing destinations is TBD
+
+**Pipeline throttle / stop**
+- Brain can signal a specific schemaId stream to slow or halt
+- Mechanism: PipelineControl interface, not direct stream manipulation
+
+```
+[Under discussion]
+- What exactly is an AgentProfile?
+- How does agent pool membership relate to $R routing destinations?
+- Does Brain AI manage one pipeline or multiple?
+- $I packet format — needs a schema ($I shadow?)
+```
+
+### PipelineControl interface (design)
+
+```ts
+interface PipelineControl {
+  stop(schemaId?: string): void
+  throttle(schemaId: string, rps: number): void
+  updateRouting(table: RoutingTable): void
+  swapAgent(agentId: string, profile: AgentProfile): void
+}
+```
+
+The Brain knows only this interface. Pipeline internals are invisible to it.
+
+---
+
 ## Current implementation status
 
 | Component | Status |
 |-----------|--------|
-| SchemaRegistry | not yet |
-| Encoder | `encoder.ts` (batch, not streaming) |
-| Streamer | `streamer.ts` (single schema, hardcoded) |
-| Gate | not yet (inline in streamer) |
-| Monitor | not yet |
-| VShadow | `validator.ts` (functional, not schema-driven) |
-| $V from schema | not yet — next step |
-| $ST collector | partial (end-of-stream summary only) |
-| $R router | not yet |
-
-**Next step:** `vShadowFromSchema(schema: DcpSchemaDef): VShadow`
-— derive $V constraints from schema type definitions automatically.
-Schema-driven shadow generation closes the gap between registry and Gate.
+| SchemaRegistry | `registry.ts` — O(1) lookup, loadFile/loadDir, registerFromHeader |
+| Encoder | `encoder.ts` — batch, flat schema は問題なし。ネスト大バッチは懸念あり（SCHEMA_GENERATION.md §8） |
+| Streamer | `streamer.ts` — transport layer のみ。タイムスタンプ付与・flow emit・InitialGate。row-by-row validation は Gate へ委譲 |
+| Gate | `gate.ts` — fixed/dynamic slot, auto-promote at 100 hits, filter/flag/isolate |
+| Monitor | `monitor.ts` — NullMonitor / SimpleMonitor / PooledMonitor + MessagePool |
+| MessagePool | `monitor.ts` — immediateQueue + batchQueue, windowMs flush, Messenger フィルタ配信 |
+| VShadow / vShadowFromSchema | `validator.ts` — スキーマ駆動、int/float 分離、min/max/enum/nullable |
+| Generator | `generator.ts` — minPresence フィルタ、int/float 精度修正済み |
+| InitialGate | `streamer.ts` — 実装済み。`--pre-check` / `--force` / `--pre-check-sample n`（SCHEMA_GENERATION.md §7） |
+| Streamer time window + flow emit | `streamer.ts` — 実装済み。1秒ウィンドウで `flow` メッセージを Monitor へ emit |
+| $ST collector | `st-collector.ts` — 実装済み。Monitor subscriber、1秒ウィンドウ集計、`st` メッセージ emit |
+| $R router | 未実装 |
+| Preprocessor | 概念のみ（ネスト展開、型正規化、フィールド監査）— パイプライン外の上流ステージ |

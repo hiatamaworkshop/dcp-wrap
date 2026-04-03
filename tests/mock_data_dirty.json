@@ -1,0 +1,25 @@
+[
+  { "summary": "RSA public-key cryptography", "tags": ["cryptography", "security", "mathematics"], "content": "Asymmetric encryption based on prime factorization difficulty.", "flags": 0, "importance": 0.92 },
+  { "summary": "TCP congestion control algorithms", "tags": ["networking", "TCP"], "content": "Reno, Cubic, BBR adapt sending rate.", "flags": 0, "importance": 0.85 },
+  { "summary": "B-tree indexing in databases", "tags": ["database", "algorithm"], "content": "Self-balancing tree optimized for disk I/O.", "flags": 0, "importance": 0.88 },
+  { "summary": "Quantum entanglement", "tags": ["physics", "quantum"], "content": "Correlated particles share state regardless of distance.", "flags": 0, "importance": 0.90 },
+  { "summary": "Neural network backpropagation", "tags": ["ml", "algorithm"], "content": "Chain rule applied across layers to compute gradients.", "flags": 0, "importance": 0.87 },
+
+  { "summary": "Missing importance field", "tags": ["test", "dirty"], "content": "This record has no importance field at all." },
+
+  { "summary": "Extra unknown field", "tags": ["test", "dirty"], "content": "This record has an extra_note field.", "flags": 0, "importance": 0.70, "extra_note": "injected bonus field" },
+
+  { "summary": "Wrong type for flags", "tags": ["test", "dirty"], "content": "Flags should be int but got string.", "flags": "HIGH", "importance": 0.65 },
+
+  { "summary": null, "tags": ["test", "dirty"], "content": "Summary is null.", "flags": 0, "importance": 0.60 },
+
+  { "summary": "Importance out of range", "tags": ["test", "dirty"], "content": "Importance should be 0-1 but is 1.5.", "flags": 0, "importance": 1.5 },
+
+  { "summary": "Negative importance", "tags": ["test"], "content": "Importance is negative, also out of range.", "flags": 0, "importance": -0.3 },
+
+  { "summary": "Flags negative", "tags": ["test"], "content": "Flags should be non-negative int.", "flags": -5, "importance": 0.72 },
+
+  { "summary": "All good after dirty batch", "tags": ["test", "clean"], "content": "This record should pass validation normally.", "flags": 0, "importance": 0.80 },
+  { "summary": "Another clean record", "tags": ["test", "clean"], "content": "Normal record after dirty ones.", "flags": 1, "importance": 0.75 },
+  { "summary": "Final clean record", "tags": ["test", "clean"], "content": "Last entry to verify pipeline continues.", "flags": 0, "importance": 0.68 }
+]
