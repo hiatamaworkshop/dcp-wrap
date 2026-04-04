@@ -41,9 +41,10 @@ import type { RawRecord } from "./preprocessor.js";
 
 /**
  * Routing table for PipelineConnector.
- * schemaId (or "*") → downstream Preprocessor instance.
+ * schemaId (or "*") → downstream Preprocessor instance(s).
+ * Use an array for fanout (1:N delivery).
  */
-export type ConnectorTable = Map<string, Preprocessor>;
+export type ConnectorTable = Map<string, Preprocessor | Preprocessor[]>;
 
 /**
  * Called when a record has no registered destination and is dropped.
@@ -66,12 +67,12 @@ export class PipelineConnector {
   private dropHandler: ConnectorDropHandler | null = null;
 
   /**
-   * Register a downstream Preprocessor for a schemaId.
+   * Register a downstream Preprocessor (or multiple for fanout) for a schemaId.
    * Use "*" to register a wildcard fallback for all unmatched schemas.
    *
    * Calling register() again with the same schemaId replaces the previous entry.
    */
-  register(schemaId: string, target: Preprocessor): void {
+  register(schemaId: string, target: Preprocessor | Preprocessor[]): void {
     this.table.set(schemaId, target);
   }
 
@@ -127,12 +128,16 @@ export class PipelineConnector {
       this.dropHandler?.(record, schemaId);
       return;
     }
-    target.process(record);
+    if (Array.isArray(target)) {
+      for (const t of target) t.process(record);
+    } else {
+      target.process(record);
+    }
   }
 
   // ── internals ──────────────────────────────────────────────────────────────
 
-  private resolve(schemaId: string): Preprocessor | undefined {
+  private resolve(schemaId: string): Preprocessor | Preprocessor[] | undefined {
     return this.table.get(schemaId) ?? this.table.get("*");
   }
 }

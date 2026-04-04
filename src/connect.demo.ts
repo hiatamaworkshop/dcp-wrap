@@ -108,6 +108,13 @@ connector.onDrop((_record, schemaId) => {
   console.log(`[CONNECTOR drop] no destination for schemaId=${schemaId}`);
 });
 
+// Wire connector to PipelineA's control so Brain AI routing_update also updates it.
+// Resolver maps pipelineId strings to Preprocessor instances.
+const pipelineMap = new Map([
+  ["pipeline://B", pB.pre],
+]);
+pA.ctrl.setConnector(connector, (id) => pipelineMap.get(id));
+
 // ── Wire Pipeline A ───────────────────────────────────────────────────────────
 
 let rowIndexA = 0;

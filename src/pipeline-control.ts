@@ -24,6 +24,9 @@ import type {
   QuarantineRejectPayload,
 } from "./postbox.ts";
 import type { RoutingLayer, RoutingTable } from "./router.ts";
+import type { PipelineConnector, ConnectorTable } from "./pipeline-connector.ts";
+import type { Preprocessor } from "./preprocessor.ts";
+
 
 // ── State types ───────────────────────────────────────────────────────────────
 
@@ -60,6 +63,11 @@ export type QuarantineRejectHandler = (quarantineId: string, reason: string) => 
  *   // Brain AI calls postbox.issueRoutingUpdate("pipeline://ingest-01", newTable)
  *   // → ctrl applies it to router automatically
  *   ctrl.detach(); // on shutdown
+ *
+ * Optional connector parameter: when provided, routing_update will also call
+ * connector.setTable() with the resolved Preprocessor instances.
+ * The caller must supply a resolver function (pipelineId → Preprocessor)
+ * because PipelineControl has no visibility into other pipelines' internals.
  */
 export class PipelineControl {
   readonly throttle: ThrottleState = { limits: new Map() };
@@ -67,6 +75,8 @@ export class PipelineControl {
 
   private onApprove: QuarantineApproveHandler | null = null;
   private onReject: QuarantineRejectHandler | null = null;
+  private connectorRef: PipelineConnector | null = null;
+  private connectorResolver: ((pipelineId: string) => Preprocessor | undefined) | null = null;
 
   private readonly handler: (msg: OutboundMessage) => void;
 
@@ -85,6 +95,19 @@ export class PipelineControl {
   /** Detach from PostBox. Call on pipeline shutdown. */
   detach(): void {
     this.postbox.unsubscribeOutbound("*", this.handler);
+  }
+
+  /**
+   * Wire a PipelineConnector so that routing_update messages also update it.
+   * resolver: given a pipelineId string, return the corresponding Preprocessor.
+   * This keeps PipelineControl decoupled from specific pipeline instances.
+   */
+  setConnector(
+    connector: PipelineConnector,
+    resolver: (pipelineId: string) => Preprocessor | undefined,
+  ): void {
+    this.connectorRef = connector;
+    this.connectorResolver = resolver;
   }
 
   /**
@@ -145,6 +168,24 @@ export class PipelineControl {
       table.set(schemaId, dest);
     }
     this.router.setTable(table);
+
+    // If a connector is wired, resolve pipelineId strings → Preprocessor instances
+    // and update the connector's routing table in sync.
+    if (this.connectorRef && this.connectorResolver) {
+      const connectorTable: ConnectorTable = new Map();
+      for (const [schemaId, dest] of payload.table) {
+        if (Array.isArray(dest)) {
+          const targets = dest
+            .map((id) => this.connectorResolver!(id))
+            .filter((p): p is Preprocessor => p !== undefined);
+          if (targets.length > 0) connectorTable.set(schemaId, targets.length === 1 ? targets[0] : targets);
+        } else {
+          const target = this.connectorResolver(dest);
+          if (target) connectorTable.set(schemaId, target);
+        }
+      }
+      this.connectorRef.setTable(connectorTable);
+    }
   }
 
   private applyThrottle(payload: ThrottlePayload): void {
