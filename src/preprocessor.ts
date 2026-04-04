@@ -84,6 +84,10 @@ export class Preprocessor {
 
   private readonly schemaField: string;
   private readonly autoRegister: boolean;
+  private readonly ctrl: PipelineControl;
+
+  // Throttle tracking: schemaId (or undefined for pipeline-wide) → { windowStart, count }
+  private readonly throttleCounters = new Map<string | undefined, { windowStart: number; count: number }>();
 
   constructor(
     private readonly registry: SchemaRegistry,
@@ -93,6 +97,7 @@ export class Preprocessor {
   ) {
     this.schemaField = options.schemaField ?? "$schema";
     this.autoRegister = options.autoRegister ?? false;
+    this.ctrl = pipelineControl;
 
     // Wire Brain AI approve → re-inject into onPass
     pipelineControl.onQuarantineApprove((quarantineId, record) => {
@@ -115,6 +120,12 @@ export class Preprocessor {
    * Resolves schema, checks fields, and routes to Pass / Drop / Quarantine.
    */
   process(record: unknown): void {
+    // ── Pipeline-wide stop check ──────────────────────────────────────────────
+    if (this.ctrl.isStopped()) {
+      this.drop(record, "pipeline stopped");
+      return;
+    }
+
     // ── Hard drop: not a plain object ─────────────────────────────────────────
     if (!isPlainObject(record)) {
       this.drop(record, "not a plain object");
@@ -127,6 +138,20 @@ export class Preprocessor {
     const schemaId = raw[this.schemaField];
     if (typeof schemaId !== "string" || schemaId.trim() === "") {
       this.drop(raw, `missing or invalid schemaId field: ${this.schemaField}`);
+      return;
+    }
+
+    // ── Schema-level stop check ───────────────────────────────────────────────
+    if (this.ctrl.isStopped(schemaId)) {
+      this.drop(raw, `schema stopped: ${schemaId}`);
+      return;
+    }
+
+    // ── Throttle check ────────────────────────────────────────────────────────
+    // getRpsLimit() returns schema-specific cap, falling back to pipeline-wide cap.
+    const rpsLimit = this.ctrl.getRpsLimit(schemaId);
+    if (rpsLimit !== undefined && this.isThrottled(schemaId, rpsLimit)) {
+      this.drop(raw, `throttled: ${schemaId} exceeds ${rpsLimit} rps`);
       return;
     }
 
@@ -226,6 +251,24 @@ export class Preprocessor {
   private drop(record: unknown, reason: string): void {
     this.dropHandler?.(record, reason);
     // default: silent drop
+  }
+
+  /**
+   * Token-bucket style 1-second window throttle.
+   * Returns true if the record should be dropped (limit exceeded).
+   * Tracks per schemaId; pipeline-wide limit uses undefined key.
+   */
+  private isThrottled(schemaId: string, rpsLimit: number): boolean {
+    const key = schemaId;
+    const now = Date.now();
+    let counter = this.throttleCounters.get(key);
+    if (!counter || now - counter.windowStart >= 1000) {
+      counter = { windowStart: now, count: 0 };
+      this.throttleCounters.set(key, counter);
+    }
+    if (counter.count >= rpsLimit) return true;
+    counter.count++;
+    return false;
   }
 }
 
