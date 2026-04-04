@@ -519,21 +519,50 @@ Gate B handles semantic filtering (flags, domain-specific rules) and routing.
 
 `PipelineConnector` は同一プロセス内の2つのパイプラインを接続する。
 
+### 設計意図
+
+パイプラインは**独立した検証単位**として設計されている。あるパイプラインが別のパイプラインの内部状態（SchemaRegistry, Gate, PostBox）を直接参照してしまうと、スキーマ変更や Gate モード変更が意図せず他パイプラインに波及する。
+
+`PipelineConnector` が解決するのは次の問題：
+
+- **独立性を保ちながらデータを渡したい** — 各パイプラインは自分のスキーマルール・Gate モード・PostBox・Brain AI サブスクリプションを持つ。接続はデータの転送のみを意味し、状態の共有を意味しない。
+- **検証は各パイプラインが責任を持つ** — PipelineA が approve した record であっても、PipelineB は自分のルールで再評価する。「A が OK と言ったから B もスキップする」という設計は採用しない。これにより PipelineB の品質基準が A に依存しない。
+- **ルーティングは Brain AI が制御できる** — `setTable()` でランタイムに宛先を切り替えられる。A → B から A → C への切り替えはデータの流れを変えるが、各パイプラインの内部には一切手を触れない。
+
+### なぜ RoutingLayer を使わないのか
+
+`RoutingLayer` は `MessagePool` 上の `vResult` メッセージを購読し、PASS 行を `RoutedRow` として `RoutingSink` に配送する。しかし `vResult` メッセージの payload は `VResultPayload`（pass/fail 判定結果のみ）であり、**元の行データを含まない**。
+
+```
+Gate.process() → monitor.emit({ type: "vResult", payload: VResultPayload })
+                                                            ↑
+                                                   index, pass, failures のみ
+                                                   フィールド名・値は含まない
+```
+
+`RoutingLayer` に行データを乗せるには `VResultPayload` の拡張が必要で、既存の `Gate` / `Monitor` / `Streamer` に影響が及ぶ。
+
+`Preprocessor.onPass` は `(record: RawRecord, schemaId: string)` を受け取る境界であり、**行データが完全な形で存在する最初のコールバック**。ここで接続するのが最も自然で、既存コードへの影響もゼロ。
+
 ### 役割と位置
 
 ```
-PipelineA.Preprocessor.onPass
-    ↓ (record, schemaId)
-PipelineConnector.forward()      ← schemaId でルーティング判定
-    ↓
-PipelineB.Preprocessor.process() ← 独立した再バリデーション
-    ↓
-PipelineB.Gate / StCollector ...
+PipelineA.Preprocessor.onPass(record, schemaId)
+    │
+    ├─ [既存] PipelineA.Gate.process(...)   ← A 独自のバリデーション・$ST 計測
+    │
+    └─ connector.forward(record, schemaId)  ← 参照渡し・ゼロコピー
+              │
+              │  schemaId でルーティング解決
+              ▼
+    PipelineB.Preprocessor.process(record)  ← B が独立して再バリデーション
+              │
+              ├─ PipelineB.Gate.process(...)
+              └─ PipelineB.StCollector → $ST-v / $ST-f（A とは独立した統計）
 ```
 
-- **Preprocessor.onPass レベルで接続** — `RoutingLayer`（Gate 後段の `VResultPayload` バス）ではなく、行データが揃っている `onPass` 境界で接続する。行データの完全なコピーを必要とせず参照渡し。
-- **再バリデーションは意図的** — PipelineB は独自のスキーマルール・Gate モード・PostBox を持つ。PipelineA が approve した record でも PipelineB がさらに厳しく評価できる。
-- **同一プロセス限定** — クロスプロセス転送は `ProxyExporter` が担当（将来）。
+- **同期・ゼロコピー** — `forward()` は同期呼び出し。record は参照渡しで追加アロケーションなし。
+- **同一プロセス限定** — クロスプロセス転送は `ProxyExporter` が担当（将来拡張）。
 
 ### ルーティングテーブル
 
@@ -542,25 +571,49 @@ connector.register("knowledge-entry:v1", pipelineB.pre);  // 特定 schemaId
 connector.register("*", pipelineC.pre);                   // ワイルドカードフォールバック
 ```
 
-解決順序: exact match → `"*"` → drop（`onDrop` コールバックが呼ばれる）。
+解決順序: exact match → `"*"` → drop（`onDrop` コールバック呼び出し）。
+
+`register()` は同じ schemaId で再呼び出しすると上書き。`unregister()` で個別削除可能。
+
+### fanout（1:N 接続）
+
+複数の Preprocessor に同一レコードを転送したい場合は、下流 Preprocessor を束ねた薄い wrapper を `register()` に渡すか、複数の `connector.forward()` を `onPass` 内で直列に並べる。1:N を `ConnectorTable` 側で持たせない理由は、fanout の制御（順序・エラー処理）がユースケースごとに異なるため。
+
+```ts
+// 例: A → B かつ A → C に同時転送
+pre.onPass((record, schemaId) => {
+  // ... gate 処理 ...
+  connectorToB.forward(record, schemaId);
+  connectorToC.forward(record, schemaId);
+});
+```
 
 ### Brain AI とのランタイム連携
 
-Brain AI が `issueRoutingUpdate()` を発行すると、呼び出し側が `connector.setTable()` でテーブルを更新する。変更は次の `forward()` 呼び出しから即時反映される。
+Brain AI は `PostBox.issueRoutingUpdate(pipelineId, table)` を呼ぶ。`PipelineControl` がこれを受けて `applyRoutingUpdate()` を実行するが、現状の `applyRoutingUpdate()` は `RoutingLayer.setTable()` を呼ぶ実装になっている。
+
+`PipelineConnector` と `PipelineControl` を連携させるには、呼び出し側で `applyRoutingUpdate` をオーバーライドまたは拡張し、`connector.setTable()` を呼ぶよう配線する。
 
 ```ts
-// PipelineControl.applyRoutingUpdate() 内から呼ぶ例
-const newTable: ConnectorTable = new Map([
-  ["knowledge-entry:v1", pipelineC.pre],  // A → C に切り替え
-]);
-connector.setTable(newTable);
+// 配線例（connect.demo では省略、本番実装時に追加する）
+ctrl.onRoutingUpdate((table) => {
+  // table: Map<schemaId, pipelineId string> → pipelineId を Preprocessor に解決して渡す
+  const resolved = new ConnectorTable();
+  for (const [schemaId, pipelineId] of table) {
+    const target = pipelineRegistry.get(pipelineId);  // pipelineId → Preprocessor
+    if (target) resolved.set(schemaId, target);
+  }
+  connector.setTable(resolved);
+});
 ```
 
-### 実装状況
+`pipelineId → Preprocessor` の解決は呼び出し側の責任（`PipelineConnector` は Preprocessor インスタンスしか知らない）。
+
+### 実装ファイル
 
 | ファイル | 内容 |
 |---------|------|
-| `pipeline-connector.ts` | PipelineConnector — ConnectorTable, register/unregister, forward, setTable |
+| `pipeline-connector.ts` | `PipelineConnector` — `ConnectorTable`, `register/unregister`, `forward`, `setTable`, `onDrop` |
 | `connect.demo.ts` | 2パイプライン接続デモ。A(flag mode) → connector → B(filter mode)、各 $ST 独立観測 |
 
 ### demo 出力例
@@ -576,9 +629,9 @@ connector.setTable(newTable);
   passed      : 13  quarantined : 2   dropped : 0
 ```
 
-- **PipelineA**: quarantine を approve/reject してすべてのレコードを connector に流す
-- **PipelineB**: type_mismatch / range_violation は reject（strictポリシー）、missing_field のみ approve
-- 各パイプラインの `$ST` は独立 — 将来 ZISV で差分比較する際もこの独立性が前提
+- **PipelineA**: quarantine を approve して pass に変換し、すべてのレコードを connector に流す（flag モード）
+- **PipelineB**: type_mismatch / range_violation を reject（strict ポリシー）、missing_field のみ approve。PipelineA が修正済みのレコードは clean で到着するため quarantine=2 に留まる
+- **$ST が一致する理由**: 同じレコードを同じスキーマで評価しているため pass_rate は一致する。将来異なるスキーマや Gate モードを使えば A と B の $ST は乖離し、ZISV の差分比較が有効になる
 
 ---
 
