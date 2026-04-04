@@ -908,12 +908,105 @@ filter (`types: ["*"]`). It adds no overhead to the pipeline itself.
 | Generator | `generator.ts` — minPresence フィルタ、int/float 精度修正済み |
 | InitialGate | `streamer.ts` — 実装済み。`--pre-check` / `--force` / `--pre-check-sample n`（SCHEMA_GENERATION.md §7） |
 | Streamer time window + flow emit | `streamer.ts` — 実装済み。1秒ウィンドウで `flow` メッセージを Monitor へ emit |
-| $ST collector | `st-collector.ts` — 実装済み。`vResult`+`flow` subscriber、`st_v`(validation統計) / `st_f`(flow統計) を分離emit |
+| $ST collector | `st-collector.ts` — 実装済み。`vResult`+`flow` subscriber、`st_v`(validation統計) / `st_f`(flow統計) を分離emit。統計エンジンは載せ替え前提（下記参照） |
 | $R router | `router.ts` — RoutingLayer, RoutingTable, fanout, `setTable()` for Brain AI updates |
 | PostBox | `postbox.ts` — inbound ($ST/$V-fail) / outbound (routing_update/throttle/stop) channels |
 | ProxyExporter | `proxy-exporter.ts` — MessagePool → PostBox bridge; pipeline has no PostBox knowledge |
 | PipelineControl | `pipeline-control.ts` — PostBox outbound → RoutingLayer/throttle/stop apply locally |
-| PostBox Recorder | 未実装 — Brain AI セッション録画・replay 用。Brain 統合後に実装 |
-| Bot (Lightweight Analyzer) | 未実装 — FastGate+Weapon パターン、$ST フィルタ → L-LLM (phi3:mini 相当) → $I 出力 |
+| PostBox Recorder | `recorder.ts` — 実装済み。inbound/outbound 全メッセージを JSONL 記録。`replay()` で Brain AI をスナップショット差し替え可能 |
+| Bot (Lightweight Analyzer) | `bot.ts` — 実装済み。FastGate+Weapon パターン、$ST フィルタ → RuleBasedLlm (phi3:mini スワップ可) → $I → IPool |
 | Brain AI | 未実装 — $I/$ST 読み取り、PostBox outbound へ決定を書く。Haiku 予定 |
 | Preprocessor | `preprocessor.ts` — 実装済み。Pass/Drop/Quarantine 判定、PostBox.pushQuarantine() 統合、Brain AI approve → re-inject 自動配線 |
+
+---
+
+## $ST 統計エンジン（載せ替え前提設計）
+
+現在の StCollector は**固定ウィンドウ + 単純カウント**のみ。
+
+```
+$ST-v: pass / fail カウント → pass_rate = pass / total
+$ST-f: 最後の flow メッセージの rowsPerSec をそのまま使用
+```
+
+Bot の Weapon 評価（`pass_rate < 0.9` 等）にはこれで十分だが、
+統計エンジンは将来の要件に応じて**差し替え可能な構造**にする。
+
+### 差し替え候補
+
+| 手法 | 効果 | 適用場面 |
+|---|---|---|
+| スライディングウィンドウ | 突発スパイクを平滑化、急落を即検出 | 高頻度ストリーム |
+| EWMA（指数移動平均） | 古いデータを自然に減衰、トレンド追跡 | 緩やかなドリフト検出 |
+| CUSUM / 変化点検出 | 「いつから悪化したか」を特定 | SLA 監視、異常検知 |
+| 分位数（p95/p99） | pass_rate の分布・外れ値の重み | 多スキーマ横断比較 |
+
+### ZISV との関係
+
+シャドウパイプライン間の差分比較（TrialCollector）では、
+ウィンドウサイズが異なると `pass_rate` の単純比較が成立しない。
+**有意差判断には共通の統計手法が前提**になるため、
+TrialCollector 実装時に統計エンジンを揃えるのが自然なタイミング。
+
+### 差し替え方針
+
+- StCollector のウィンドウ計算部分（`flush()` 内）を `StEngine` インターフェースとして抽出
+- デフォルト実装 = 現在の固定ウィンドウ
+- Brain AI 統合後、実データで必要性が見えた時点で差し替える
+
+---
+
+## Future: Zero-Inference Shadow Validation / ZISV (遠い将来案)
+
+### 概念
+
+複数の試験パイプライン（シャドウ）を本番と並走させ、**推論リソースを一切使わずに**
+構造差分を統計だけで検証する。Brain が動くのは本番環境での意思決定時のみ。
+
+> **設計原則: 推論は貴重な資源。シャドウは無推論で動く。**
+
+### データフロー
+
+```
+本番パイプライン:
+  source → Pre → Gate → $ST → Bot(L-LLM) → $I → Brain(Haiku)
+                                  ↑ 推論あり              ↑ 推論あり（本番のみ）
+
+シャドウパイプライン（推論なし）:
+  source → Pre → Gate_A → $ST_A ─┐
+              → Gate_B → $ST_B ─┤→ TrialCollector(diff) → Brain（有意差があれば1回だけ）
+              → Gate_C → $ST_C ─┘
+                  ↑ Bot なし・Brain なし・$ST 収集のみ
+                                              ↓
+                                  Brain → AgentProfile 更新 or $R 切り替え
+```
+
+### シャドウパイプラインの制約
+
+- **Bot なし** — L-LLM 呼び出しゼロ
+- **Brain なし** — Haiku 呼び出しゼロ
+- `$ST`（pass_rate / fail / rowsPerSec）だけ収集
+- 「どの構造が良いか」は**統計差分だけで判断**
+- TrialCollector が差分を計算し、有意な場合のみ Brain に通知
+
+### Brain が動く条件
+
+- シャドウの $ST が本番と有意に異なる場合のみ（差分閾値はAgentProfileで設定）
+- 判断は1回 = AgentProfile 更新 or $R 切り替え
+- シャドウが本番を上回ると判断したら構造を採用、下回れば破棄
+
+### TrialCollector の設計方針
+
+- 各 TrialPipeline の `$ST-v` を PostBox inbound に push（既存の配線を流用）
+- `expected: Set<pipelineId>` — 全員分が揃うまで待機（Promise.all 相当）
+- タイムアウト付き — 失敗・遅延パイプラインがあっても揃った分で発火
+- Brain は `Map<pipelineId, StVRow>` を受け取り横断比較 → bestCandidate 決定
+
+### 実装前提条件
+
+- `$R` ファンアウトモード（RoutingLayer への複数宛先配信）
+- TrialCollector 本体（薄い集約レイヤー）
+- Brain AI 基礎実装（単一パイプライン往復が先）
+
+現状は単一パイプラインの Bot → $I → Brain の往復を固める段階。
+TrialCollector は `$R` ファンアウトと同時に実装するのが自然。

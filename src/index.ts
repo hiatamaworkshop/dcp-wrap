@@ -52,3 +52,9 @@ export type { PreprocessorOptions, PassHandler, DropHandler, RawRecord } from ".
 export { IPool } from "./i-pool.js";
 export type { IPoolOptions } from "./i-pool.js";
 export type { Weapon, TriggerMode, AgentProfile, IPacket } from "./types.js";
+
+export { Bot, RuleBasedLlm } from "./bot.js";
+export type { BotOptions, LlmAdapter, LlmInput, LlmOutput, StMetrics } from "./bot.js";
+
+export { Recorder, replay } from "./recorder.js";
+export type { RecorderOptions, ReplayOptions, SnapshotRecord } from "./recorder.js";
