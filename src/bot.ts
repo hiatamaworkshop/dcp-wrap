@@ -5,12 +5,21 @@
  * evaluation, and — when the trigger fires — produces an $I packet that is
  * pushed to IPool for Brain AI to consume.
  *
- * L-LLM integration:
- *   Currently uses RuleBasedLlm (deterministic, zero-latency).
- *   Replace with a real phi3:mini adapter when model is available:
- *     const bot = new Bot(monitor, postbox, ipool, profile, { llm: new PhiAdapter() });
+ * L-LLM adapters:
+ *   RuleBasedLlm  — deterministic, zero-latency (default)
+ *   ClaudeAdapter — Haiku / any Claude model via Anthropic SDK
+ *
+ * Usage:
+ *   // Rule-based (default)
+ *   const bot = new Bot(monitor, postbox, ipool, profile);
+ *
+ *   // Haiku
+ *   const bot = new Bot(monitor, postbox, ipool, profile, {
+ *     llm: new ClaudeAdapter({ model: "claude-haiku-4-5-20251001" }),
+ *   });
  */
 
+import Anthropic from "@anthropic-ai/sdk";
 import type { SimpleMonitor } from "./monitor.js";
 import type { PostBox } from "./postbox.js";
 import type { IPool } from "./i-pool.js";
@@ -62,6 +71,65 @@ export class RuleBasedLlm implements LlmAdapter {
     if (metrics.pass_rate < 0.5)      severity = "high";
     else if (metrics.pass_rate < 0.8) severity = "medium";
     return { signal, severity };
+  }
+}
+
+/**
+ * ClaudeAdapter — calls Claude (Haiku by default) as the Bot's L-LLM.
+ *
+ * The prompt is intentionally minimal: schema ID, fired weapon names,
+ * and key metrics. Brain AI receives the full $I context separately.
+ *
+ * Model default: claude-haiku-4-5-20251001
+ * Override: new ClaudeAdapter({ model: "claude-haiku-4-5-20251001", apiKey: "..." })
+ */
+export interface ClaudeAdapterOptions {
+  model?:  string;
+  apiKey?: string;   // falls back to ANTHROPIC_API_KEY env var
+}
+
+export class ClaudeAdapter implements LlmAdapter {
+  private readonly client: Anthropic;
+  private readonly model:  string;
+
+  constructor(options: ClaudeAdapterOptions = {}) {
+    this.client = new Anthropic({ apiKey: options.apiKey });
+    this.model  = options.model ?? "claude-haiku-4-5-20251001";
+  }
+
+  async infer(input: LlmInput): Promise<LlmOutput> {
+    const { schemaId, metrics, firedNames, profile } = input;
+
+    const prompt = [
+      `Pipeline schema: ${schemaId}`,
+      `Weapons fired: ${firedNames.join(", ")}`,
+      `Metrics: pass_rate=${metrics.pass_rate}, fail=${metrics.fail}, total=${metrics.total}, rowsPerSec=${metrics.rowsPerSec}`,
+      profile.llmPromptHint ? `Hint: ${profile.llmPromptHint}` : "",
+      "",
+      "Respond with JSON only: {\"signal\": \"<one sentence>\", \"severity\": \"low|medium|high\"}",
+    ].filter(Boolean).join("\n");
+
+    const msg = await this.client.messages.create({
+      model:      this.model,
+      max_tokens: 128,
+      messages:   [{ role: "user", content: prompt }],
+    });
+
+    const text = msg.content
+      .filter((b) => b.type === "text")
+      .map((b) => (b as { type: "text"; text: string }).text)
+      .join("");
+
+    try {
+      const parsed = JSON.parse(text) as { signal?: string; severity?: string };
+      const severity = (["low", "medium", "high"].includes(parsed.severity ?? ""))
+        ? parsed.severity as LlmOutput["severity"]
+        : "low";
+      return { signal: parsed.signal ?? text, severity };
+    } catch {
+      // fallback if model doesn't return clean JSON
+      return { signal: text.slice(0, 200), severity: "low" };
+    }
   }
 }
 

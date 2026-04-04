@@ -38,7 +38,9 @@
     "url": "git+https://github.com/hiatamaworkshop/dcp-wrap.git"
   },
   "homepage": "https://dcp-docs.pages.dev",
-  "dependencies": {},
+  "dependencies": {
+    "@anthropic-ai/sdk": "^0.82.0"
+  },
   "devDependencies": {
     "@types/node": "^20.0.0",
     "typescript": "^5.3.0"
