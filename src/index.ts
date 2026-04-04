@@ -61,3 +61,6 @@ export type { RecorderOptions, ReplayOptions, SnapshotRecord } from "./recorder.
 
 export { Brain, RuleBasedBrain, ClaudeBrain } from "./brain.js";
 export type { BrainOptions, BrainAdapter, BrainInput, BrainDecision, ClaudeBrainOptions } from "./brain.js";
+
+export { PipelineConnector } from "./pipeline-connector.js";
+export type { ConnectorTable, ConnectorDropHandler } from "./pipeline-connector.js";

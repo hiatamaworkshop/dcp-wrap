@@ -515,6 +515,73 @@ Gate B handles semantic filtering (flags, domain-specific rules) and routing.
 
 ---
 
+## パイプライン間接続 — PipelineConnector
+
+`PipelineConnector` は同一プロセス内の2つのパイプラインを接続する。
+
+### 役割と位置
+
+```
+PipelineA.Preprocessor.onPass
+    ↓ (record, schemaId)
+PipelineConnector.forward()      ← schemaId でルーティング判定
+    ↓
+PipelineB.Preprocessor.process() ← 独立した再バリデーション
+    ↓
+PipelineB.Gate / StCollector ...
+```
+
+- **Preprocessor.onPass レベルで接続** — `RoutingLayer`（Gate 後段の `VResultPayload` バス）ではなく、行データが揃っている `onPass` 境界で接続する。行データの完全なコピーを必要とせず参照渡し。
+- **再バリデーションは意図的** — PipelineB は独自のスキーマルール・Gate モード・PostBox を持つ。PipelineA が approve した record でも PipelineB がさらに厳しく評価できる。
+- **同一プロセス限定** — クロスプロセス転送は `ProxyExporter` が担当（将来）。
+
+### ルーティングテーブル
+
+```ts
+connector.register("knowledge-entry:v1", pipelineB.pre);  // 特定 schemaId
+connector.register("*", pipelineC.pre);                   // ワイルドカードフォールバック
+```
+
+解決順序: exact match → `"*"` → drop（`onDrop` コールバックが呼ばれる）。
+
+### Brain AI とのランタイム連携
+
+Brain AI が `issueRoutingUpdate()` を発行すると、呼び出し側が `connector.setTable()` でテーブルを更新する。変更は次の `forward()` 呼び出しから即時反映される。
+
+```ts
+// PipelineControl.applyRoutingUpdate() 内から呼ぶ例
+const newTable: ConnectorTable = new Map([
+  ["knowledge-entry:v1", pipelineC.pre],  // A → C に切り替え
+]);
+connector.setTable(newTable);
+```
+
+### 実装状況
+
+| ファイル | 内容 |
+|---------|------|
+| `pipeline-connector.ts` | PipelineConnector — ConnectorTable, register/unregister, forward, setTable |
+| `connect.demo.ts` | 2パイプライン接続デモ。A(flag mode) → connector → B(filter mode)、各 $ST 独立観測 |
+
+### demo 出力例
+
+```
+[A $ST-v] schema=knowledge-entry:v1  pass=11  fail=2  total=13  pass_rate=0.846
+[B $ST-v] schema=knowledge-entry:v1  pass=11  fail=2  total=13  pass_rate=0.846
+
+=== Pipeline A (flag — passes all to connector) ===
+  passed      : 13  quarantined : 16  dropped : 5
+
+=== Pipeline B (filter — re-validates independently) ===
+  passed      : 13  quarantined : 2   dropped : 0
+```
+
+- **PipelineA**: quarantine を approve/reject してすべてのレコードを connector に流す
+- **PipelineB**: type_mismatch / range_violation は reject（strictポリシー）、missing_field のみ approve
+- 各パイプラインの `$ST` は独立 — 将来 ZISV で差分比較する際もこの独立性が前提
+
+---
+
 ## Brain AI — pipeline control principle
 
 **AI must never enter the data pipeline.**
@@ -917,6 +984,7 @@ filter (`types: ["*"]`). It adds no overhead to the pipeline itself.
 | Bot (Lightweight Analyzer) | `bot.ts` — 実装済み。FastGate+Weapon パターン、$ST フィルタ → RuleBasedLlm (phi3:mini スワップ可) → $I → IPool |
 | Brain AI | `brain.ts` — 実装済み。IPool drain → BrainAdapter(evaluate) → PostBox outbound。RuleBasedBrain(default) / ClaudeBrain(Haiku) スワップ可 |
 | Preprocessor | `preprocessor.ts` — 実装済み。Pass/Drop/Quarantine 判定、PostBox.pushQuarantine() 統合、Brain AI approve → re-inject 自動配線 |
+| PipelineConnector | `pipeline-connector.ts` — 実装済み。同一プロセス内パイプライン間接続。schemaId ルーティング、ワイルドカード、setTable() でランタイム変更可 |
 
 ---
 
