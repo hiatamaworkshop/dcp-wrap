@@ -17,6 +17,7 @@
  */
 
 import type { RoutingTable } from "./router.ts";
+import type { AgentProfile } from "./types.ts";
 
 // ── Inbound message types (pipeline → PostBox) ────────────────────────────────
 
@@ -90,11 +91,9 @@ export interface StopPayload {
   schemaId?: string;    // if omitted: stop entire pipeline
 }
 
+/** Outbound: Brain AI rewrites a Bot's AgentProfile. Bot reloads on receipt. */
 export interface AgentProfilePayload {
-  pipelineId: string;
-  capabilities: string[];
-  capacity: number;       // max rps this pipeline can sustain
-  schemaAffinity: string[];  // schemaIds this pipeline handles well
+  profile: AgentProfile;
 }
 
 export type OutboundPayload =
@@ -227,6 +226,19 @@ export class PostBox {
       pipelineId,
       ts: Date.now(),
       payload,
+    });
+  }
+
+  /**
+   * Brain AI rewrites a Bot's AgentProfile.
+   * Bot subscribes to "ap_update" outbound and reloads its weapons on receipt.
+   */
+  issueAgentProfileUpdate(botId: string, profile: AgentProfile): void {
+    this.pushOutbound({
+      type: "ap_update",
+      pipelineId: botId,
+      ts: Date.now(),
+      payload: { profile } satisfies AgentProfilePayload,
     });
   }
 

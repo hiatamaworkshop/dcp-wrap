@@ -27,4 +27,28 @@ export type { GateOptions, GateResult, ValidationMode } from "./gate.js";
 export type { Monitor, PipelineMessage, MessageType, MessagePriority, FlowPayload, VResultPayload, Messenger, MessengerFilter } from "./monitor.js";
 
 export { StCollector } from "./st-collector.js";
-export type { StWindow, StRow, StCollectorOptions } from "./st-collector.js";
+export type { StVRow, StFRow, StRow, StCollectorOptions } from "./st-collector.js";
+
+export { PostBox } from "./postbox.js";
+export type {
+  InboundMessage, OutboundMessage, InboundType, OutboundType,
+  QuarantinePayload, QuarantineApprovePayload, QuarantineRejectPayload, QuarantineReason,
+  RoutingUpdatePayload, ThrottlePayload, StopPayload, AgentProfilePayload,
+  InboundHandler, OutboundHandler,
+} from "./postbox.js";
+
+export { RoutingLayer } from "./router.js";
+export type { RoutingTable, RoutingDestination, RoutedRow, RoutingSink } from "./router.js";
+
+export { ProxyExporter } from "./proxy-exporter.js";
+export type { ProxyExporterOptions } from "./proxy-exporter.js";
+
+export { PipelineControl } from "./pipeline-control.js";
+export type { ThrottleState, StopState, QuarantineApproveHandler, QuarantineRejectHandler } from "./pipeline-control.js";
+
+export { Preprocessor } from "./preprocessor.js";
+export type { PreprocessorOptions, PassHandler, DropHandler, RawRecord } from "./preprocessor.js";
+
+export { IPool } from "./i-pool.js";
+export type { IPoolOptions } from "./i-pool.js";
+export type { Weapon, TriggerMode, AgentProfile, IPacket } from "./types.js";

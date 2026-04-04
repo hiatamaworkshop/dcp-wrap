@@ -148,6 +148,70 @@ Quarantine entries carry enough context for a human reviewer to decide:
 - approve → feed to Generator as additional samples → schema update
 - reject → Drop
 
+### Hard drop vs quarantine — the decision boundary
+
+Not every violation is worth Brain AI's attention. The Preprocessor applies
+a two-tier triage:
+
+**Hard drop (no PostBox involvement):**
+- Record is not a plain object (`null`, bare string, array)
+- `$schema` field missing, empty, or not a string
+- `schemaId` is not registered and `autoRegister` is off
+
+These cases are structurally corrupt at the ingress boundary. There is no
+useful data for Brain AI to inspect. Drop and log.
+
+**Quarantine (PostBox → Brain AI):**
+- `unknown_field` — field present in record but absent from schema
+- `missing_field` — required field absent from record
+- `type_mismatch` — field present but wrong JS type (including float-for-int,
+  boolean-for-int, nested object for string)
+- `range_violation` — numeric value outside min/max bounds, or NaN/Infinity
+
+These cases are schema boundary events. The record may be valid under a
+newer schema version, or Brain AI may be able to correct and re-inject it.
+A quarantined record is never silently lost.
+
+**NaN and Infinity are range violations, not type mismatches.**
+`typeof NaN === "number"` and `typeof Infinity === "number"` — both pass the
+type check. The Preprocessor explicitly tests `!isFinite(value)` before
+applying min/max bounds, so they are caught as `range_violation`.
+
+**Multiple violations per record: first wins.**
+The Preprocessor stops at the first detected violation and quarantines the
+record with that reason. Brain AI receives one clean signal per record.
+If Brain AI's correction introduces a second violation, the re-injected
+record will be quarantined again with the new reason.
+
+**`array` type fields:**
+DCP schemas use `"type": "array"` for fields that carry arrays (e.g. tags).
+The Preprocessor checks `Array.isArray(value)` for these — not `typeof value`
+(which returns `"object"` for arrays). Without this, every array field would
+trigger a spurious `type_mismatch`.
+
+### Quarantine re-inject flow
+
+```
+Preprocessor.process(record)
+    ↓ violation detected
+PostBox.pushQuarantine(pipelineId, { quarantineId, schemaId, reason, detail, record })
+    ↓ Brain AI (or stub) reads inbound "quarantine"
+PostBox.issueQuarantineApprove(pipelineId, { quarantineId, correctedRecord })
+    ↓ PipelineControl receives outbound "quarantine_approve"
+    ↓ calls registered onQuarantineApprove handler
+Preprocessor.reInject(quarantineId, correctedRecord)
+    ↓ re-processes corrected record
+passHandler(record, schemaId)   ← if correction passes all checks
+```
+
+`correctedRecord` is optional. If Brain AI omits it, the original record
+is not re-injected (Preprocessor drops it silently rather than re-quarantining
+in a loop). If Brain AI rejects instead, `onQuarantineReject` fires — the
+default is silent drop; a handler can be registered for custom logging.
+
+The Preprocessor wires `pipelineControl.onQuarantineApprove()` automatically
+in its constructor. Callers do not need to connect these manually.
+
 ### InitialGate after Preprocessor
 
 When a Preprocessor is in place, InitialGate acts as the final checkpoint
@@ -489,6 +553,65 @@ the pipeline's latency guarantees.
 The Lightweight Analyzer acts as a buffer between the fast pipeline and
 the slow Brain AI. $ST collection is never blocked by inference latency.
 
+### Bot (Lightweight Analyzer) — design principles
+
+The Bot is a **worker AI** that monitors pipeline statistics and outputs
+inference signals (`$I`). It sits between the fast pipeline and Brain AI.
+
+**Model tier**: phi3:mini or equivalent — smaller and faster than Haiku.
+Brain AI is Haiku. The Bot is below Haiku. The split is intentional:
+- Bot: high-frequency, low-cost, "what is this pattern?"
+- Brain: low-frequency, high-cost, "what should we do about it?"
+
+**FastGate + Weapon pattern** (from phi-agent / Sphere Project):
+
+The key principle: *LLM は1箇所だけ* — LLM is called exactly once per
+trigger. Everything before it is deterministic, 0ms computation.
+
+```
+$ST (every window)
+    ↓
+[Weapon group]   ← numeric filters on $ST metrics, 0ms
+    ↓ score > threshold only
+[L-LLM (phi3:mini)]   ← 1 call: "what does this pattern mean?"
+    ↓
+[$I packet]   → FIFO ring buffer → Brain AI reads at own pace
+```
+
+**Weapon** = a named, configurable $ST filter. Multiple weapons can be
+defined. Any single weapon firing triggers the L-LLM call.
+
+```
+Weapon examples:
+  pass_rate_drop   : pass_rate < 0.8  → weight 1.0
+  zero_flow        : rowsPerSec == 0  → weight 1.0
+  fail_spike       : fail > 10        → weight 0.8
+  combined score   : Σ(metric × weight) > threshold
+```
+
+The weapon configuration is the Bot's "character" — a Bot sensitive to
+pass_rate is different from one sensitive to flow. Configuration only;
+no code change needed to define a new Bot personality.
+
+**What the L-LLM is asked**: one question only.
+
+```
+"This $ST pattern was flagged. What does it signal?
+ Answer with: signal (string), severity (low|medium|high)"
+→ $I { schemaId, signal, severity, context: $ST row }
+```
+
+The Bot does not make control decisions. It perceives and labels.
+Brain AI evaluates $I packets and decides whether to act.
+
+**LLM uncertainty is localized**: if the Bot hallucinates a severity,
+Brain AI still decides whether to act. Bot output does not trigger
+pipeline changes directly. Worst case: a spurious $I in the buffer.
+
+**$I ring buffer (FIFO)**: fixed capacity. Oldest entries dropped when
+full. Brain AI reads at its own pace — $I production never blocks the
+pipeline or the Bot.
+
 ### What Brain AI may and may not do
 
 | Operation | Permitted | Reason |
@@ -557,22 +680,104 @@ data or calling pipeline internals directly.
 - Change takes effect on the next row, no pipeline interruption
 
 **Agent profiles**
-- Each pipeline has a profile (capabilities, capacity, schema affinity)
-- Brain holds AgentProfileMap in-memory: `pipelineId → profile`
+- Brain holds AgentProfileMap in-memory: `botId → AgentProfile`
 - Profile updates arrive via PostBox ($AP messages); Brain updates its map on receipt
-- How profiles map to routing decisions is TBD
+- Brain can rewrite a Bot's Weapon thresholds via $AP — raising or lowering
+  sensitivity without restarting the Bot
+- See AgentProfile schema below
 
 **Pipeline throttle / stop**
 - Brain writes throttle/stop instruction to PostBox
 - Pipeline reads and applies via PipelineControl interface
 
+---
+
+### AgentProfile schema
+
+AgentProfile is the shared object between Bot and Brain.
+
+- **Bot** reads its own profile at startup to load its Weapon set and behavior.
+- **Brain** holds all profiles in AgentProfileMap and may rewrite them via $AP
+  messages — adjusting a Bot's sensitivity or focus without code changes.
+
+```ts
+interface Weapon {
+  name: string;                          // e.g. "pass_rate_drop"
+  metric: "pass_rate" | "fail" | "rowsPerSec" | string;
+  op: "<" | ">" | "<=" | ">=" | "==" | "!=";
+  threshold: number;
+  weight: number;                        // contribution to score trigger
+}
+
+type TriggerMode =
+  | { mode: "any" }                      // any single Weapon fires → call L-LLM
+  | { mode: "score"; scoreThreshold: number }  // Σ(weight) > threshold → call L-LLM
+  | { mode: "all" }                      // all Weapons must fire (AND)
+
+interface AgentProfile {
+  id: string;                            // e.g. "bot-quality-watcher"
+  botId: string;                         // pipelineId of the Bot instance
+  model: string;                         // e.g. "phi3:mini" — L-LLM model hint
+  weapons: Weapon[];                     // FastGate filter set
+  trigger: TriggerMode;
+  llmPromptHint?: string;               // context injected into L-LLM prompt
+                                         // e.g. "focus on data quality degradation"
+  schemaScope?: string[];               // schemaIds this Bot watches; [] = all
+}
 ```
-[Under discussion]
-- What exactly is an AgentProfile?
-- How does agent pool membership relate to $R routing destinations?
-- $I packet format — needs a schema ($I shadow?)
-- $AP (AgentProfile update) message format
+
+**Dual role of AgentProfile:**
+
 ```
+Bot perspective:
+  reads own profile at init
+  weapons[] → FastGate filter logic
+  trigger   → when to call L-LLM
+  llmPromptHint → shapes L-LLM question
+
+Brain perspective:
+  AgentProfileMap: botId → AgentProfile
+  reads to understand each Bot's character and focus
+  writes $AP to update weapons[].threshold, trigger.scoreThreshold, schemaScope
+  → Bot reloads on next $AP receive
+```
+
+**Brain stays neutral** because it reads AgentProfiles rather than encoding
+judgment directly. Brain's "decisions" are profile reads + targeted updates.
+The judgment criteria live in the profiles, not in Brain's logic.
+
+**Example profiles:**
+
+```jsonc
+// Sensitive to data quality
+{
+  "id": "bot-quality-watcher",
+  "botId": "pipeline://bot-01",
+  "model": "phi3:mini",
+  "weapons": [
+    { "name": "pass_rate_drop", "metric": "pass_rate", "op": "<",  "threshold": 0.8, "weight": 1.0 },
+    { "name": "fail_spike",     "metric": "fail",      "op": ">",  "threshold": 10,  "weight": 0.8 }
+  ],
+  "trigger": { "mode": "any" },
+  "llmPromptHint": "focus on data quality degradation"
+}
+
+// Sensitive to flow interruption
+{
+  "id": "bot-flow-monitor",
+  "botId": "pipeline://bot-02",
+  "model": "phi3:mini",
+  "weapons": [
+    { "name": "zero_flow",    "metric": "rowsPerSec", "op": "==", "threshold": 0,   "weight": 1.0 },
+    { "name": "flow_drop",    "metric": "rowsPerSec", "op": "<",  "threshold": 10,  "weight": 0.6 }
+  ],
+  "trigger": { "mode": "score", "scoreThreshold": 1.0 },
+  "llmPromptHint": "focus on flow interruption and throughput loss"
+}
+```
+
+Multiple Bot instances with different profiles can run against the same
+pipeline simultaneously. Each fires independently; Brain reads all $I output.
 
 ### PipelineControl interface (design)
 
@@ -709,5 +914,6 @@ filter (`types: ["*"]`). It adds no overhead to the pipeline itself.
 | ProxyExporter | `proxy-exporter.ts` — MessagePool → PostBox bridge; pipeline has no PostBox knowledge |
 | PipelineControl | `pipeline-control.ts` — PostBox outbound → RoutingLayer/throttle/stop apply locally |
 | PostBox Recorder | 未実装 — Brain AI セッション録画・replay 用。Brain 統合後に実装 |
-| Brain AI | 未実装 — $I/$ST 読み取り、PostBox outbound へ決定を書く。Haiku API 予定 |
-| Preprocessor | 概念のみ（ネスト展開、型正規化、フィールド監査）— パイプライン外の上流ステージ |
+| Bot (Lightweight Analyzer) | 未実装 — FastGate+Weapon パターン、$ST フィルタ → L-LLM (phi3:mini 相当) → $I 出力 |
+| Brain AI | 未実装 — $I/$ST 読み取り、PostBox outbound へ決定を書く。Haiku 予定 |
+| Preprocessor | `preprocessor.ts` — 実装済み。Pass/Drop/Quarantine 判定、PostBox.pushQuarantine() 統合、Brain AI approve → re-inject 自動配線 |

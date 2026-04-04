@@ -121,3 +121,58 @@ export interface EncodedBatch {
   mask: number;
   isCutdown: boolean;
 }
+
+// ── Bot / AgentProfile types ──────────────────────────────────────────────────
+
+/**
+ * A single numeric filter applied to a $ST metric.
+ * Multiple Weapons form the FastGate filter set for a Bot.
+ */
+export interface Weapon {
+  name: string;
+  metric: "pass_rate" | "fail" | "rowsPerSec" | string;
+  op: "<" | ">" | "<=" | ">=" | "==" | "!=";
+  threshold: number;
+  weight: number;
+}
+
+/**
+ * When to call the L-LLM after Weapon evaluation.
+ *   any   — any single Weapon fires
+ *   score — sum(weight of fired Weapons) > scoreThreshold
+ *   all   — all Weapons must fire (AND)
+ */
+export type TriggerMode =
+  | { mode: "any" }
+  | { mode: "score"; scoreThreshold: number }
+  | { mode: "all" };
+
+/**
+ * AgentProfile — shared object between Bot and Brain AI.
+ *
+ * Bot reads its own profile at startup to load weapons and behavior.
+ * Brain holds AgentProfileMap (botId -> AgentProfile) and may rewrite
+ * profiles via $AP messages to adjust Bot sensitivity without restart.
+ */
+export interface AgentProfile {
+  id: string;
+  botId: string;
+  model: string;
+  weapons: Weapon[];
+  trigger: TriggerMode;
+  /** Optional context injected into L-LLM prompt. */
+  llmPromptHint?: string;
+  /** SchemaIds this Bot watches. Empty array = watch all. */
+  schemaScope?: string[];
+}
+
+/** $I packet — inference result produced by a Bot after L-LLM call. */
+export interface IPacket {
+  botId: string;
+  schemaId: string;
+  signal: string;
+  severity: "low" | "medium" | "high";
+  /** The $ST row that triggered this inference. */
+  context: unknown;
+  ts: number;
+}

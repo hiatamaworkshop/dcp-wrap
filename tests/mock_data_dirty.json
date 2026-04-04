@@ -21,5 +21,37 @@
 
   { "summary": "All good after dirty batch", "tags": ["test", "clean"], "content": "This record should pass validation normally.", "flags": 0, "importance": 0.80 },
   { "summary": "Another clean record", "tags": ["test", "clean"], "content": "Normal record after dirty ones.", "flags": 1, "importance": 0.75 },
-  { "summary": "Final clean record", "tags": ["test", "clean"], "content": "Last entry to verify pipeline continues.", "flags": 0, "importance": 0.68 }
+  { "summary": "Final clean record", "tags": ["test", "clean"], "content": "Last entry to verify pipeline continues.", "flags": 0, "importance": 0.68 },
+
+  null,
+
+  "just a bare string, not an object",
+
+  [1, 2, 3],
+
+  {},
+
+  { "$schema": "knowledge-entry:v1" },
+
+  { "summary": "No schema field", "tags": ["test"], "content": "This record has no $schema key.", "flags": 0, "importance": 0.5 },
+
+  { "$schema": "", "summary": "Empty schema id", "tags": ["test"], "content": "Schema field is empty string.", "flags": 0, "importance": 0.5 },
+
+  { "$schema": "alien:v99", "summary": "Unknown schema", "tags": ["test"], "content": "This schema is not registered.", "flags": 0, "importance": 0.5 },
+
+  { "summary": "Importance is NaN", "tags": ["test", "dirty"], "content": "NaN should not pass numeric range check.", "flags": 0, "importance": "NaN" },
+
+  { "summary": "Importance is a string number", "tags": ["test", "dirty"], "content": "importance as string '0.9' looks valid but wrong type.", "flags": 0, "importance": "0.9" },
+
+  { "summary": "Content is a nested object", "tags": ["test", "dirty"], "content": { "nested": "object", "depth": 1 }, "flags": 0, "importance": 0.5 },
+
+  { "summary": "Combined: unknown field + range violation", "tags": ["test", "dirty"], "content": "Both extra_field and importance out of range.", "flags": 0, "importance": 2.0, "extra_field": "surprise" },
+
+  { "summary": "Combined: missing field + unknown field", "tags": ["test", "dirty"], "content": "importance missing and rogue_key present.", "flags": 0, "rogue_key": "intruder" },
+
+  { "summary": "Flags is float not int", "tags": ["test", "dirty"], "content": "flags=1.5 fails int check.", "flags": 1.5, "importance": 0.6 },
+
+  { "summary": "Flags is boolean", "tags": ["test", "dirty"], "content": "flags=true is boolean not int.", "flags": true, "importance": 0.6 },
+
+  { "summary": "All fields wrong type", "tags": ["test", "dirty"], "content": 99999, "flags": "zero", "importance": false }
 ]
