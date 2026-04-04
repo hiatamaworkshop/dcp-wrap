@@ -1,53 +1,74 @@
 /**
- * $ST Collector — windowed pass/fail statistics subscriber.
+ * $ST Collector — windowed statistics subscriber.
  *
- * Subscribes to "vResult" messages on a Monitor and accumulates
- * per-schema pass/fail counts. At each window boundary, emits a
- * $ST positional array as the payload — conforming to DCP Stats Shadow form:
+ * Subscribes to "vResult" and "flow" messages on a Monitor and accumulates
+ * per-schema statistics. At each window boundary, emits:
  *
- *   ["$ST", schemaId, pass_count, fail_count, sample_n, pass_rate]
+ *   $ST-v  validation statistics:
+ *     ["$ST-v", schemaId, pass_count, fail_count, sample_n, pass_rate, windowMs]
  *
- * This follows the DCP convention: in-memory aggregation uses $ST form.
- * Positional array, schema-scoped, emitted per window boundary.
+ *   $ST-f  flow statistics:
+ *     ["$ST-f", schemaId, rowsPerSec, windowMs]
  *
- * Usage:
- *   const st = new StCollector(monitor, { windowMs: 1000 });
- *   st.start();
- *   // ... pipeline runs ...
- *   st.stop(); // flushes final window
+ * Consumers (lightweight AI agents) subscribe to the type they care about.
  */
 
-import type { Monitor, PipelineMessage, VResultPayload } from "./monitor.js";
+import type { Monitor, PipelineMessage, VResultPayload, FlowPayload } from "./monitor.js";
 
-export interface StWindow {
-  schemaId: string;
+// ── $ST-v ──────────────────────────────────────────────────────
+
+/**
+ * $ST-v positional array: ["$ST-v", schemaId, pass, fail, total, pass_rate, windowMs]
+ */
+export type StVRow = [
+  "$ST-v",
+  string,   // schemaId
+  number,   // pass_count
+  number,   // fail_count
+  number,   // sample_n (total)
+  number,   // pass_rate  e.g. 0.999
+  number,   // windowMs
+];
+
+// ── $ST-f ──────────────────────────────────────────────────────
+
+/**
+ * $ST-f positional array: ["$ST-f", schemaId, rowsPerSec, windowMs]
+ */
+export type StFRow = [
+  "$ST-f",
+  string,   // schemaId
+  number,   // rowsPerSec
+  number,   // windowMs
+];
+
+/** @deprecated Use StVRow */
+export type StRow = StVRow;
+
+// ── Internal window state ──────────────────────────────────────
+
+interface VWindow {
   pass: number;
   fail: number;
   windowStart: number;
 }
 
-/**
- * $ST positional array: ["$ST", schemaId, pass, fail, total, pass_rate, window_ms]
- * Conforms to DCP Stats Shadow form.
- */
-export type StRow = [
-  "$ST",
-  string,   // schemaId
-  number,   // pass_count
-  number,   // fail_count
-  number,   // sample_n (total)
-  string,   // pass_rate  e.g. "0.999"
-  string,   // window_ms  e.g. "1000ms"
-];
+interface FWindow {
+  rowsPerSec: number;   // latest value from flow message
+  windowStart: number;
+}
 
 export interface StCollectorOptions {
   /** Flush interval in ms. Default: 1000 */
   windowMs?: number;
 }
 
+// ── StCollector ────────────────────────────────────────────────
+
 export class StCollector {
   private readonly windowMs: number;
-  private readonly windows: Map<string, StWindow> = new Map();
+  private readonly vWindows: Map<string, VWindow> = new Map();
+  private readonly fWindows: Map<string, FWindow> = new Map();
   private timer: ReturnType<typeof setInterval> | null = null;
 
   constructor(
@@ -56,60 +77,100 @@ export class StCollector {
   ) {
     this.windowMs = options.windowMs ?? 1000;
     this.onVResult = this.onVResult.bind(this);
+    this.onFlow    = this.onFlow.bind(this);
   }
 
   start(): void {
     this.monitor.subscribe("vResult", this.onVResult);
+    this.monitor.subscribe("flow",    this.onFlow);
     this.timer = setInterval(() => this.flush(), this.windowMs);
   }
 
   stop(): void {
     this.monitor.unsubscribe("vResult", this.onVResult);
+    this.monitor.unsubscribe("flow",    this.onFlow);
     if (this.timer) {
       clearInterval(this.timer);
       this.timer = null;
     }
-    this.flush(); // drain remaining counts
+    this.flush();
   }
+
+  // ── Handlers ───────────────────────────────────────────────
 
   private onVResult(msg: PipelineMessage): void {
     const p = msg.payload as VResultPayload;
-    let win = this.windows.get(msg.schemaId);
+    let win = this.vWindows.get(msg.schemaId);
     if (!win) {
-      win = { schemaId: msg.schemaId, pass: 0, fail: 0, windowStart: Date.now() };
-      this.windows.set(msg.schemaId, win);
+      win = { pass: 0, fail: 0, windowStart: Date.now() };
+      this.vWindows.set(msg.schemaId, win);
     }
     if (p.pass) win.pass++; else win.fail++;
   }
 
+  private onFlow(msg: PipelineMessage): void {
+    const p = msg.payload as FlowPayload;
+    let win = this.fWindows.get(msg.schemaId);
+    if (!win) {
+      win = { rowsPerSec: 0, windowStart: Date.now() };
+      this.fWindows.set(msg.schemaId, win);
+    }
+    win.rowsPerSec = p.rowsPerSec;
+  }
+
+  // ── Flush ──────────────────────────────────────────────────
+
   private flush(): void {
     const now = Date.now();
-    for (const [schemaId, win] of this.windows) {
+
+    // $ST-v
+    for (const [schemaId, win] of this.vWindows) {
       const total = win.pass + win.fail;
       if (total === 0) continue;
 
       const elapsed = now - win.windowStart;
-      const stRow: StRow = [
-        "$ST",
+      const row: StVRow = [
+        "$ST-v",
         schemaId,
         win.pass,
         win.fail,
         total,
-        (win.pass / total).toFixed(3),
-        `${elapsed}ms`,
+        parseFloat((win.pass / total).toFixed(3)),
+        elapsed,
       ];
 
       this.monitor.emit({
-        type: "st",
+        type: "st_v",
         schemaId,
         ts: now,
         priority: "batch",
-        payload: stRow,
+        payload: row,
       });
 
-      // Reset window
       win.pass = 0;
       win.fail = 0;
+      win.windowStart = now;
+    }
+
+    // $ST-f
+    for (const [schemaId, win] of this.fWindows) {
+      const elapsed = now - win.windowStart;
+      const row: StFRow = [
+        "$ST-f",
+        schemaId,
+        win.rowsPerSec,
+        elapsed,
+      ];
+
+      this.monitor.emit({
+        type: "st_f",
+        schemaId,
+        ts: now,
+        priority: "batch",
+        payload: row,
+      });
+
+      win.rowsPerSec = 0;
       win.windowStart = now;
     }
   }

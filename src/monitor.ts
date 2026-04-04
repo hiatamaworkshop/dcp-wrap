@@ -10,7 +10,8 @@ export type MessageType =
   | "vResult"      // Gate: validation result for a row
   | "promote"      // Gate → slot manager: promote schema to fixed slot
   | "schema_loaded" // Registry: new schema registered
-  | "st";          // StCollector: windowed pass/fail summary
+  | "st_v"         // StCollector: windowed validation statistics (pass/fail)
+  | "st_f";        // StCollector: windowed flow statistics (rows/sec)
 
 export type MessagePriority = "immediate" | "batch";
 

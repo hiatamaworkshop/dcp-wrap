@@ -31,7 +31,7 @@ import { createInterface } from "node:readline";
 import { SchemaGenerator } from "./generator.js";
 import { PooledMonitor } from "./monitor.js";
 import { StCollector } from "./st-collector.js";
-import type { StRow } from "./st-collector.js";
+import type { StVRow, StFRow } from "./st-collector.js";
 import { SchemaRegistry } from "./registry.js";
 import { Gate } from "./gate.js";
 import type { ValidationMode } from "./gate.js";
@@ -299,9 +299,12 @@ async function main() {
   const monitor = new PooledMonitor(100);
   const st = new StCollector(monitor, { windowMs: 1000 });
 
-  // Log $ST windows to stderr as they arrive — payload is StRow (DCP positional array)
-  monitor.subscribe("st", (msg) => {
-    process.stderr.write(JSON.stringify(msg.payload as StRow) + "\n");
+  // Log $ST windows to stderr as they arrive
+  monitor.subscribe("st_v", (msg) => {
+    process.stderr.write(JSON.stringify(msg.payload as StVRow) + "\n");
+  });
+  monitor.subscribe("st_f", (msg) => {
+    process.stderr.write(JSON.stringify(msg.payload as StFRow) + "\n");
   });
 
   monitor.start();
