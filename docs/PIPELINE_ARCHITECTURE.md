@@ -55,6 +55,111 @@ quirks, and independently testable against well-formed data.
 
 ---
 
+## Preprocessor — upstream normalization stage
+
+### Position
+
+```
+[Raw JSON source]
+      ↓
+[Preprocessor]     ← record-level, resident, transforms data
+      ↓
+[InitialGate]      ← batch-level, one-shot, Go/No-Go only
+      ↓
+[Encoder → Streamer → Gate → ...]
+```
+
+Preprocessor and InitialGate are distinct concepts with different
+responsibilities, granularities, and lifetimes.
+
+| | Preprocessor | InitialGate |
+|---|---|---|
+| Purpose | Normalize and decide per record | Gate the batch before streaming begins |
+| Granularity | Record-level | Batch-level |
+| Lifetime | Resident — runs continuously | One-shot — runs once at stream start |
+| Transforms data | Yes | No |
+| Output | Clean record, Drop, or Quarantine | Go or No-Go |
+
+### Responsibilities
+
+**1. Structural normalization**
+- Flatten nested fields (`user.address.city` → flat field)
+- Separate array-of-objects into sub-schemas (`items[].price` → own schema)
+- Unify field names (`user_id` / `userId` / `id` → canonical name)
+
+**2. Type normalization**
+- String `"123"` → number `123` where schema expects numeric
+- Unify null / `""` / absent → `-` (DCP absent marker)
+- Normalize datetime formats
+
+**3. Anomaly decision — the Preprocessor's sole judgment call**
+
+```
+明らかな破損（必須フィールド欠損、型が完全に違う）
+  → Drop + log
+
+スキーマ境界ケース（未知フィールド、微妙な型ずれ、range violation）
+  → Quarantine
+
+正常（スキーマに適合）
+  → Encoder へ渡す
+```
+
+The Preprocessor does not fix ambiguous data. It passes clean records,
+drops corrupt records, and quarantines uncertain ones. It does not guess.
+
+### Schema reference
+
+The Preprocessor pulls the schema from SchemaRegistry (same registry the
+pipeline uses). This is intentional: the same schema drives both upstream
+normalization and downstream validation.
+
+**Schema tentativeness caveat:**
+
+Schemas are not ground truth — they are observations crystallized at a
+point in time. In the early phase especially, unknown fields and type
+mismatches will arrive. The Preprocessor must not treat schema mismatch
+as an error by default; it must treat it as a signal for schema evolution.
+
+```
+スキーマ信頼度が低い初期フェーズ:
+  未知フィールドが多い → Quarantine に溜まる
+  人間が目視・承認
+  Generator.from_samples(quarantine_samples) → スキーマ v+1 候補
+  承認 → SchemaRegistry 更新
+  Preprocessor が v+1 で再処理
+```
+
+Quarantine is the feedback loop entry point into schema evolution.
+Drop is for records that are unambiguously corrupt regardless of schema version.
+
+### Quarantine format
+
+```jsonl
+{"ts":1234567890, "schemaId":"user:v1", "reason":"unknown_field",
+ "detail":"field 'extra_note' not in schema (present in 3/50 records)",
+ "record": { ...original JSON... }}
+{"ts":1234567891, "schemaId":"user:v1", "reason":"range_violation",
+ "detail":"field 'importance' value 1.5 exceeds max 1.0",
+ "record": { ...original JSON... }}
+```
+
+Quarantine entries carry enough context for a human reviewer to decide:
+- approve → feed to Generator as additional samples → schema update
+- reject → Drop
+
+### InitialGate after Preprocessor
+
+When a Preprocessor is in place, InitialGate acts as the final checkpoint
+on Preprocessor output — confirming that what reaches the Encoder is
+genuinely schema-conformant. Without a Preprocessor (direct JSON → pipeline),
+InitialGate is the primary safety net.
+
+InitialGate does not replace Preprocessor. It does not transform data.
+It only asks: "is this batch safe to stream?"
+
+---
+
 ## Schema Registry
 
 The source of truth for schemas lives in `schemas/` on disk. At runtime,
