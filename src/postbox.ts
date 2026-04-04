@@ -1,8 +1,9 @@
 /**
  * PostBox — single message broker between all pipelines and Brain AI.
  *
- * Inbound  (pipelines → Brain AI): $ST, $I, $V fail events
- * Outbound (Brain AI → pipelines): routing_update, throttle, stop, ap_update
+ * Inbound  (pipelines → Brain AI): $ST, $I, $V fail events, quarantine
+ * Outbound (Brain AI → pipelines): routing_update, throttle, stop, ap_update,
+ *                                   quarantine_approve, quarantine_reject
  *
  * Neither pipelines nor Brain AI know each other's internals.
  * PostBox is the only address both sides know.
@@ -19,7 +20,7 @@ import type { RoutingTable } from "./router.ts";
 
 // ── Inbound message types (pipeline → PostBox) ────────────────────────────────
 
-export type InboundType = "st_v" | "st_f" | "v_fail" | "i_result";
+export type InboundType = "st_v" | "st_f" | "v_fail" | "i_result" | "quarantine";
 
 export interface InboundMessage {
   type: InboundType;
@@ -30,7 +31,51 @@ export interface InboundMessage {
 
 // ── Outbound message types (PostBox → pipeline) ──────────────────────────────
 
-export type OutboundType = "routing_update" | "throttle" | "stop" | "ap_update";
+export type OutboundType =
+  | "routing_update"
+  | "throttle"
+  | "stop"
+  | "ap_update"
+  | "quarantine_approve"
+  | "quarantine_reject";
+
+// ── Quarantine types ──────────────────────────────────────────────────────────
+
+export type QuarantineReason =
+  | "unknown_field"
+  | "missing_field"
+  | "type_mismatch"
+  | "range_violation";
+
+/**
+ * Inbound: Preprocessor detected a schema mismatch and quarantines the record.
+ * Brain AI reads this, inspects the record, and issues approve or reject.
+ */
+export interface QuarantinePayload {
+  quarantineId: string;         // unique ID for Brain AI to reference in its decision
+  schemaId: string;
+  reason: QuarantineReason;
+  detail: string;               // human-readable description of the mismatch
+  record: unknown;              // original JSON record as-is
+}
+
+/**
+ * Outbound: Brain AI approves a quarantined record.
+ * correctedRecord: Brain AI may return a corrected version of the record.
+ * If omitted, the original record is re-injected as-is.
+ */
+export interface QuarantineApprovePayload {
+  quarantineId: string;
+  correctedRecord?: unknown;    // Brain AI may fix the record before re-injection
+}
+
+/**
+ * Outbound: Brain AI rejects a quarantined record → Drop + log.
+ */
+export interface QuarantineRejectPayload {
+  quarantineId: string;
+  reason: string;               // Brain AI's explanation for the rejection
+}
 
 export interface RoutingUpdatePayload {
   table: [string, string | string[]][];   // serializable RoutingTable entries
@@ -56,7 +101,9 @@ export type OutboundPayload =
   | RoutingUpdatePayload
   | ThrottlePayload
   | StopPayload
-  | AgentProfilePayload;
+  | AgentProfilePayload
+  | QuarantineApprovePayload
+  | QuarantineRejectPayload;
 
 export interface OutboundMessage {
   type: OutboundType;
@@ -154,6 +201,44 @@ export class PostBox {
       pipelineId,
       ts: Date.now(),
       payload: { schemaId } satisfies StopPayload,
+    });
+  }
+
+  /**
+   * Preprocessor pushes a quarantined record to Brain AI for inspection.
+   * Brain AI will respond with quarantine_approve or quarantine_reject.
+   */
+  pushQuarantine(pipelineId: string, payload: QuarantinePayload): void {
+    this.pushInbound({
+      type: "quarantine",
+      pipelineId,
+      ts: Date.now(),
+      payload,
+    });
+  }
+
+  /**
+   * Brain AI (or test code) approves a quarantined record.
+   * PipelineControl re-injects correctedRecord (or original) into the Encoder.
+   */
+  issueQuarantineApprove(pipelineId: string, payload: QuarantineApprovePayload): void {
+    this.pushOutbound({
+      type: "quarantine_approve",
+      pipelineId,
+      ts: Date.now(),
+      payload,
+    });
+  }
+
+  /**
+   * Brain AI rejects a quarantined record → PipelineControl drops it.
+   */
+  issueQuarantineReject(pipelineId: string, payload: QuarantineRejectPayload): void {
+    this.pushOutbound({
+      type: "quarantine_reject",
+      pipelineId,
+      ts: Date.now(),
+      payload,
     });
   }
 

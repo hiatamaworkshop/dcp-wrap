@@ -3,16 +3,26 @@
  *
  * Subscribes to the PostBox outbound channel filtered by this pipeline's ID.
  * Translates Brain AI decisions into local pipeline state changes:
- *   routing_update → RoutingLayer.setTable()
- *   throttle       → ThrottleState (Streamer reads this)
- *   stop           → StopState
- *   ap_update      → AgentProfileMap (Brain AI reads; not applicable here)
+ *   routing_update     → RoutingLayer.setTable()
+ *   throttle           → ThrottleState (Streamer reads this)
+ *   stop               → StopState
+ *   ap_update          → AgentProfileMap (Brain AI reads; not applicable here)
+ *   quarantine_approve → re-inject corrected record into Encoder callback
+ *   quarantine_reject  → drop record, emit log entry
  *
  * Brain AI writes to PostBox; PipelineControl applies locally.
  * Brain AI never touches pipeline internals directly.
  */
 
-import type { PostBox, OutboundMessage, RoutingUpdatePayload, ThrottlePayload, StopPayload } from "./postbox.ts";
+import type {
+  PostBox,
+  OutboundMessage,
+  RoutingUpdatePayload,
+  ThrottlePayload,
+  StopPayload,
+  QuarantineApprovePayload,
+  QuarantineRejectPayload,
+} from "./postbox.ts";
 import type { RoutingLayer, RoutingTable } from "./router.ts";
 
 // ── State types ───────────────────────────────────────────────────────────────
@@ -26,6 +36,19 @@ export interface StopState {
   /** schemaIds to stop. Empty set = stop entire pipeline. */
   stopped: Set<string | undefined>;
 }
+
+/**
+ * Callback invoked when Brain AI approves a quarantined record.
+ * The Preprocessor (or whoever pushed the quarantine) registers this
+ * to re-inject the (possibly corrected) record into the Encoder.
+ */
+export type QuarantineApproveHandler = (quarantineId: string, record: unknown) => void;
+
+/**
+ * Callback invoked when Brain AI rejects a quarantined record.
+ * Default behaviour: drop silently. Register to add custom logging.
+ */
+export type QuarantineRejectHandler = (quarantineId: string, reason: string) => void;
 
 // ── PipelineControl ───────────────────────────────────────────────────────────
 
@@ -41,6 +64,9 @@ export interface StopState {
 export class PipelineControl {
   readonly throttle: ThrottleState = { limits: new Map() };
   readonly stop: StopState = { stopped: new Set() };
+
+  private onApprove: QuarantineApproveHandler | null = null;
+  private onReject: QuarantineRejectHandler | null = null;
 
   private readonly handler: (msg: OutboundMessage) => void;
 
@@ -59,6 +85,22 @@ export class PipelineControl {
   /** Detach from PostBox. Call on pipeline shutdown. */
   detach(): void {
     this.postbox.unsubscribeOutbound("*", this.handler);
+  }
+
+  /**
+   * Register a callback for quarantine_approve.
+   * Preprocessor calls this to wire re-injection into the Encoder.
+   */
+  onQuarantineApprove(handler: QuarantineApproveHandler): void {
+    this.onApprove = handler;
+  }
+
+  /**
+   * Register a callback for quarantine_reject.
+   * Optional — default is silent drop.
+   */
+  onQuarantineReject(handler: QuarantineRejectHandler): void {
+    this.onReject = handler;
   }
 
   /** True if the given schemaId (or the pipeline entirely) has been stopped. */
@@ -88,6 +130,12 @@ export class PipelineControl {
         // AgentProfile updates are consumed by Brain AI's in-memory registry.
         // PipelineControl receives them but has no local action to take.
         break;
+      case "quarantine_approve":
+        this.applyQuarantineApprove(msg.payload as QuarantineApprovePayload);
+        break;
+      case "quarantine_reject":
+        this.applyQuarantineReject(msg.payload as QuarantineRejectPayload);
+        break;
     }
   }
 
@@ -107,5 +155,19 @@ export class PipelineControl {
   private applyStop(payload: StopPayload): void {
     // schemaId undefined = stop entire pipeline
     this.stop.stopped.add(payload.schemaId);
+  }
+
+  private applyQuarantineApprove(payload: QuarantineApprovePayload): void {
+    if (this.onApprove) {
+      const record = payload.correctedRecord ?? null;
+      this.onApprove(payload.quarantineId, record);
+    }
+  }
+
+  private applyQuarantineReject(payload: QuarantineRejectPayload): void {
+    if (this.onReject) {
+      this.onReject(payload.quarantineId, payload.reason);
+    }
+    // default: silent drop — no handler required
   }
 }
