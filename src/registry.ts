@@ -126,6 +126,17 @@ export class SchemaRegistry {
     return this.entries.get(schemaId);
   }
 
+  /**
+   * Replace the VShadow for an already-registered schema.
+   * Used when Brain AI issues a validation_update at runtime.
+   * No-op if schemaId is not registered.
+   */
+  updateVShadow(schemaId: string, vShadow: VShadow): void {
+    const entry = this.entries.get(schemaId);
+    if (!entry) return;
+    this.entries.set(schemaId, { ...entry, vShadow });
+  }
+
   /** Debug summary. */
   summary(): string {
     if (this.entries.size === 0) return "SchemaRegistry: empty";

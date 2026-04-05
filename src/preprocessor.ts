@@ -171,7 +171,7 @@ export class Preprocessor {
       }
     }
 
-    const { schema } = entry;
+    const { schema, vShadow } = entry;
 
     // ── Field-level inspection ────────────────────────────────────────────────
     const recordKeys = new Set(Object.keys(raw).filter((k) => k !== this.schemaField));
@@ -193,19 +193,14 @@ export class Preprocessor {
       return;
     }
 
-    // Type / range checks using the schema's type definitions
-    for (const field of schema.fields) {
-      const typeDef = schema.types[field];
-      if (!typeDef) continue;
-
-      const value = raw[field];
-      const reason = checkFieldType(field, value, typeDef);
-      if (reason) {
-        const qReason: QuarantineReason =
-          reason.startsWith("range") ? "range_violation" : "type_mismatch";
-        this.quarantine(raw, schemaId, qReason, reason);
-        return;
-      }
+    // Type / range checks via compiled VShadow
+    const vResult = vShadow.validate(raw);
+    if (!vResult.pass) {
+      const first = vResult.failures[0];
+      const qReason: QuarantineReason =
+        first.reason?.startsWith("range") ? "range_violation" : "type_mismatch";
+      this.quarantine(raw, schemaId, qReason, first.reason ?? `validation failed: ${first.field}`);
+      return;
     }
 
     // ── Pass ──────────────────────────────────────────────────────────────────
@@ -276,55 +271,4 @@ export class Preprocessor {
 
 function isPlainObject(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null && !Array.isArray(value);
-}
-
-/**
- * Check a single field value against its FieldTypeDef.
- * Returns a human-readable failure reason string, or null if OK.
- */
-function checkFieldType(
-  field: string,
-  value: unknown,
-  typeDef: { type: string | string[]; enum?: unknown[]; min?: number; max?: number },
-): string | null {
-  const types = Array.isArray(typeDef.type) ? typeDef.type : [typeDef.type];
-  const isNullable = types.includes("null");
-  const absent = value === null || value === undefined || value === "-";
-
-  if (absent) {
-    return isNullable ? null : `field ${field}: null/absent not allowed`;
-  }
-
-  const nonNull = types.filter((t) => t !== "null");
-  if (nonNull.length > 0) {
-    let typeOk = false;
-    for (const t of nonNull) {
-      if (t === "string" && typeof value === "string") typeOk = true;
-      else if (t === "number" && typeof value === "number") typeOk = true;
-      else if (t === "int" && typeof value === "number" && Number.isInteger(value)) typeOk = true;
-      else if (t === "boolean" && typeof value === "boolean") typeOk = true;
-      else if (t === "array" && Array.isArray(value)) typeOk = true;
-    }
-    if (!typeOk) {
-      return `type_mismatch: field ${field} expected ${typeDef.type}, got ${typeof value}`;
-    }
-  }
-
-  if (typeDef.enum !== undefined && !typeDef.enum.includes(value)) {
-    return `type_mismatch: field ${field} value ${JSON.stringify(value)} not in enum`;
-  }
-
-  if (typeof value === "number") {
-    if (!isFinite(value)) {
-      return `range_violation: field ${field} value ${value} is not finite (NaN or Infinity)`;
-    }
-    if (typeDef.min !== undefined && value < typeDef.min) {
-      return `range_violation: field ${field} value ${value} < min ${typeDef.min}`;
-    }
-    if (typeDef.max !== undefined && value > typeDef.max) {
-      return `range_violation: field ${field} value ${value} > max ${typeDef.max}`;
-    }
-  }
-
-  return null;
 }

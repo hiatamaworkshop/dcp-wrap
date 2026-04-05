@@ -22,10 +22,13 @@ import type {
   StopPayload,
   QuarantineApprovePayload,
   QuarantineRejectPayload,
+  ValidationUpdatePayload,
 } from "./postbox.ts";
 import type { RoutingLayer, RoutingTable } from "./router.ts";
 import type { PipelineConnector, ConnectorTable } from "./pipeline-connector.ts";
 import type { Preprocessor } from "./preprocessor.ts";
+import type { SchemaRegistry } from "./registry.ts";
+import { VShadow } from "./validator.js";
 
 
 // ── State types ───────────────────────────────────────────────────────────────
@@ -84,6 +87,7 @@ export class PipelineControl {
     readonly pipelineId: string,
     private readonly postbox: PostBox,
     private readonly router: RoutingLayer,
+    private readonly registry?: SchemaRegistry,
   ) {
     this.handler = (msg: OutboundMessage) => {
       if (msg.pipelineId !== this.pipelineId) return;
@@ -153,6 +157,9 @@ export class PipelineControl {
         // AgentProfile updates are consumed by Brain AI's in-memory registry.
         // PipelineControl receives them but has no local action to take.
         break;
+      case "validation_update":
+        this.applyValidationUpdate(msg.payload as ValidationUpdatePayload);
+        break;
       case "quarantine_approve":
         this.applyQuarantineApprove(msg.payload as QuarantineApprovePayload);
         break;
@@ -210,5 +217,11 @@ export class PipelineControl {
       this.onReject(payload.quarantineId, payload.reason);
     }
     // default: silent drop — no handler required
+  }
+
+  private applyValidationUpdate(payload: ValidationUpdatePayload): void {
+    if (!this.registry) return;
+    const vShadow = new VShadow(payload.schemaId, payload.constraints);
+    this.registry.updateVShadow(payload.schemaId, vShadow);
   }
 }

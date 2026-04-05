@@ -38,7 +38,8 @@ export type OutboundType =
   | "stop"
   | "ap_update"
   | "quarantine_approve"
-  | "quarantine_reject";
+  | "quarantine_reject"
+  | "validation_update";
 
 // ── Quarantine types ──────────────────────────────────────────────────────────
 
@@ -96,13 +97,25 @@ export interface AgentProfilePayload {
   profile: AgentProfile;
 }
 
+/**
+ * Outbound: Brain AI issues new per-field constraints for a schema's VShadow.
+ * PipelineControl replaces the compiled VShadow in SchemaRegistry on receipt.
+ * Next record processed will use the new constraints.
+ */
+export interface ValidationUpdatePayload {
+  schemaId: string;
+  /** Per-field constraints. Keys must match schema field names. */
+  constraints: Record<string, import("./validator.js").VConstraint>;
+}
+
 export type OutboundPayload =
   | RoutingUpdatePayload
   | ThrottlePayload
   | StopPayload
   | AgentProfilePayload
   | QuarantineApprovePayload
-  | QuarantineRejectPayload;
+  | QuarantineRejectPayload
+  | ValidationUpdatePayload;
 
 export interface OutboundMessage {
   type: OutboundType;
@@ -239,6 +252,23 @@ export class PostBox {
       pipelineId: botId,
       ts: Date.now(),
       payload: { profile } satisfies AgentProfilePayload,
+    });
+  }
+
+  /**
+   * Brain AI issues updated validation constraints for a schema.
+   * PipelineControl recompiles and replaces the VShadow in SchemaRegistry.
+   */
+  issueValidationUpdate(
+    pipelineId: string,
+    schemaId: string,
+    constraints: ValidationUpdatePayload["constraints"],
+  ): void {
+    this.pushOutbound({
+      type: "validation_update",
+      pipelineId,
+      ts: Date.now(),
+      payload: { schemaId, constraints } satisfies ValidationUpdatePayload,
     });
   }
 
