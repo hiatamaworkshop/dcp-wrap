@@ -23,12 +23,13 @@
 import Anthropic from "@anthropic-ai/sdk";
 import type { IPool } from "./i-pool.js";
 import type { IPacket, AgentProfile } from "./types.js";
-import type { PostBox } from "./postbox.js";
+import type { PostBox, QuarantineApprovePayload, QuarantineRejectPayload, QuarantinePayload } from "./postbox.js";
 
 // ── Brain adapter interface ───────────────────────────────────────────────────
 
 export interface BrainInput {
-  packets: IPacket[];   // drained from IPool
+  packets: IPacket[];                                      // drained from IPool
+  quarantines: { pipelineId: string; payload: QuarantinePayload }[];  // pending quarantine items
 }
 
 /**
@@ -44,6 +45,10 @@ export interface BrainDecision {
   stop?: { pipelineId: string; schemaId?: string };
   /** Rewrite a Bot's AgentProfile (adjust weapon sensitivity). */
   updateProfile?: AgentProfile;
+  /** Approve a quarantined record (optionally with correction). */
+  quarantineApprove?: { pipelineId: string } & QuarantineApprovePayload;
+  /** Reject a quarantined record. */
+  quarantineReject?: { pipelineId: string } & QuarantineRejectPayload;
   /** Free-text rationale (logged, not acted on). */
   rationale?: string;
 }
@@ -64,8 +69,23 @@ export interface BrainAdapter {
  */
 export class RuleBasedBrain implements BrainAdapter {
   async evaluate(input: BrainInput): Promise<BrainDecision> {
-    const { packets } = input;
-    if (packets.length === 0) return {};
+    const { packets, quarantines } = input;
+
+    // ── Quarantine: approve all by default (re-inject as-is) ──────────────────
+    // RuleBasedBrain has no semantic understanding — pass everything through.
+    // Override with a custom adapter for domain-specific triage.
+    const decision: BrainDecision = {};
+
+    if (quarantines.length > 0) {
+      // Process first quarantine only (one decision per tick)
+      const q = quarantines[0];
+      decision.quarantineApprove = {
+        pipelineId: q.pipelineId,
+        quarantineId: q.payload.quarantineId,
+      };
+    }
+
+    if (packets.length === 0) return decision;
 
     const maxSeverity = packets.reduce<"low" | "medium" | "high">((max, p) => {
       if (p.severity === "high")                           return "high";
@@ -73,22 +93,23 @@ export class RuleBasedBrain implements BrainAdapter {
       return max;
     }, "low");
 
-    // use the first packet's pipelineId context (schemaId is available)
     const first = packets[0];
 
     if (maxSeverity === "high") {
       return {
+        ...decision,
         stop: { pipelineId: `pipeline://default`, schemaId: first.schemaId },
         rationale: `[rule] high severity $I from bot=${first.botId} — stop schema stream`,
       };
     }
     if (maxSeverity === "medium") {
       return {
+        ...decision,
         throttle: { pipelineId: `pipeline://default`, schemaId: first.schemaId, rps: 10 },
         rationale: `[rule] medium severity $I from bot=${first.botId} — throttle to 10 rps`,
       };
     }
-    return { rationale: `[rule] all low severity — no action` };
+    return { ...decision, rationale: `[rule] all low severity — no action` };
   }
 }
 
@@ -115,27 +136,36 @@ export class ClaudeBrain implements BrainAdapter {
   }
 
   async evaluate(input: BrainInput): Promise<BrainDecision> {
-    const { packets } = input;
-    if (packets.length === 0) return {};
+    const { packets, quarantines } = input;
+    if (packets.length === 0 && quarantines.length === 0) return {};
 
-    const summary = packets.map((p) =>
+    const packetSummary = packets.map((p) =>
       `- bot=${p.botId} schema=${p.schemaId} severity=${p.severity} signal="${p.signal}"`,
-    ).join("\n");
+    ).join("\n") || "(none)";
+
+    const quarantineSummary = quarantines.map((q) =>
+      `- quarantineId=${q.payload.quarantineId} schema=${q.payload.schemaId} reason=${q.payload.reason} detail="${q.payload.detail}"`,
+    ).join("\n") || "(none)";
 
     const prompt = [
       "You are a pipeline control authority (Brain AI).",
-      "You receive inference signals ($I) from lightweight Bot observers.",
-      "Based on the signals below, decide what control action to take.",
+      "You receive inference signals ($I) from Bot observers and quarantined records.",
+      "Based on the inputs below, decide what control action to take.",
       "",
       "$I packets:",
-      summary,
+      packetSummary,
+      "",
+      "Quarantined records (decide approve or reject for each):",
+      quarantineSummary,
       "",
       "Available actions (respond with JSON only, omit fields you don't use):",
       JSON.stringify({
-        rerouteSchema: { schemaId: "<id>", toPipelineId: "pipeline://<id>" },
-        throttle:      { pipelineId: "pipeline://<id>", schemaId: "<optional>", rps: 10 },
-        stop:          { pipelineId: "pipeline://<id>", schemaId: "<optional>" },
-        rationale:     "<one sentence explanation>",
+        rerouteSchema:    { schemaId: "<id>", toPipelineId: "pipeline://<id>" },
+        throttle:         { pipelineId: "pipeline://<id>", schemaId: "<optional>", rps: 10 },
+        stop:             { pipelineId: "pipeline://<id>", schemaId: "<optional>" },
+        quarantineApprove: { pipelineId: "pipeline://<id>", quarantineId: "<id>", correctedRecord: "<optional>" },
+        quarantineReject:  { pipelineId: "pipeline://<id>", quarantineId: "<id>", reason: "<explanation>" },
+        rationale:        "<one sentence explanation>",
       }, null, 2),
     ].join("\n");
 
@@ -175,6 +205,7 @@ export class Brain {
   private readonly intervalMs: number;
   private readonly pipelineId: string;
   private timer: ReturnType<typeof setInterval> | null = null;
+  private readonly quarantineBuffer: { pipelineId: string; payload: QuarantinePayload }[] = [];
 
   constructor(ipool: IPool, postbox: PostBox, options: BrainOptions = {}) {
     this.ipool      = ipool;
@@ -182,6 +213,14 @@ export class Brain {
     this.adapter    = options.adapter    ?? new RuleBasedBrain();
     this.intervalMs = options.intervalMs ?? 2000;
     this.pipelineId = options.pipelineId ?? "pipeline://default";
+
+    // Subscribe to quarantine inbound — buffer until next tick
+    this.postbox.subscribeInbound("quarantine", (msg) => {
+      this.quarantineBuffer.push({
+        pipelineId: msg.pipelineId,
+        payload: msg.payload as QuarantinePayload,
+      });
+    });
   }
 
   start(): void {
@@ -203,8 +242,9 @@ export class Brain {
   // ── internals ──────────────────────────────────────────────────────────────
 
   private async tick(): Promise<BrainDecision> {
-    const packets = this.ipool.drain();
-    const decision = await this.adapter.evaluate({ packets });
+    const packets     = this.ipool.drain();
+    const quarantines = this.quarantineBuffer.splice(0);
+    const decision    = await this.adapter.evaluate({ packets, quarantines });
     this.apply(decision);
     return decision;
   }
@@ -229,6 +269,14 @@ export class Brain {
         decision.updateProfile.botId,
         decision.updateProfile,
       );
+    }
+    if (decision.quarantineApprove) {
+      const { pipelineId, ...payload } = decision.quarantineApprove;
+      this.postbox.issueQuarantineApprove(pipelineId, payload);
+    }
+    if (decision.quarantineReject) {
+      const { pipelineId, ...payload } = decision.quarantineReject;
+      this.postbox.issueQuarantineReject(pipelineId, payload);
     }
   }
 }

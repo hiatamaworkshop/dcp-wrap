@@ -198,7 +198,8 @@ export class Preprocessor {
     if (!vResult.pass) {
       const first = vResult.failures[0];
       const qReason: QuarantineReason =
-        first.reason?.startsWith("range") ? "range_violation" : "type_mismatch";
+        (first.reason?.includes("< min") || first.reason?.includes("> max"))
+          ? "range_violation" : "type_mismatch";
       this.quarantine(raw, schemaId, qReason, first.reason ?? `validation failed: ${first.field}`);
       return;
     }
