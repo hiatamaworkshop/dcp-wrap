@@ -17,7 +17,7 @@
   "scripts": {
     "build": "tsc",
     "dev": "tsc --watch",
-    "test": "tsc && node --test dist/decoder.test.js dist/picoclaw-hook.test.js dist/pipeline-connector.test.js dist/validation.test.js dist/pipeline-chain.test.js",
+    "test": "tsc && node --test dist/decoder.test.js dist/pipeline-connector.test.js dist/validation.test.js dist/pipeline-chain.test.js",
     "prepublishOnly": "npm run test"
   },
   "files": [
@@ -27,10 +27,7 @@
     "!dist/*.test.js",
     "!dist/*.test.js.map",
     "!dist/*.test.d.ts",
-    "!dist/picoclaw-hook.js",
-    "!dist/picoclaw-hook.js.map",
-    "!dist/picoclaw-hook.d.ts",
-    "README.md",
+"README.md",
     "docs"
   ],
   "repository": {
