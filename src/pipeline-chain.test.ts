@@ -13,11 +13,13 @@ import { describe, it } from "node:test";
 import assert from "node:assert/strict";
 
 import { SchemaRegistry }         from "./registry.js";
+import { SchemaCache }            from "./schema-cache.js";
 import { PostBox }                from "./postbox.js";
 import { RoutingLayer }           from "./router.js";
 import { MessagePool }            from "./monitor.js";
 import { PipelineControl }        from "./pipeline-control.js";
 import { Preprocessor }           from "./preprocessor.js";
+import { JSONAdapter }            from "./adapters/json-adapter.js";
 import { PipelineConnector }      from "./pipeline-connector.js";
 import { IPool }                  from "./i-pool.js";
 import { Brain }                  from "./brain.js";
@@ -44,10 +46,10 @@ const SCHEMA: DcpSchemaDef = {
 
 interface PL {
   id:      string;
-  pre:     Preprocessor;
+  pre:     Preprocessor<RawRecord>;
   postbox: PostBox;
   ctrl:    PipelineControl;
-  arrived: RawRecord[];
+  arrived: unknown[][];
 }
 
 function makePipeline(id: string, registry?: SchemaRegistry): PL {
@@ -55,18 +57,20 @@ function makePipeline(id: string, registry?: SchemaRegistry): PL {
   const postbox = new PostBox();
   const router  = new RoutingLayer(new MessagePool(), { receive: () => {} });
   const ctrl    = new PipelineControl(id, postbox, router, reg);
-  const pre     = new Preprocessor(reg, postbox, ctrl, { pipelineId: id, schemaField: "$schema" });
-  const arrived: RawRecord[] = [];
+  const adapter = new JSONAdapter("$schema");
+  const cache   = new SchemaCache(reg);
+  const pre     = new Preprocessor<RawRecord>(adapter, cache, postbox, ctrl, { pipelineId: id });
+  const arrived: unknown[][] = [];
   // Default onPass: record arrived at this pipeline
-  pre.onPass((r) => arrived.push(r));
+  pre.onPass((arr) => arrived.push(arr));
   return { id, pre, postbox, ctrl, arrived };
 }
 
 /** Wire A's onPass to also forward via connector (arrived still receives). */
 function wireForward(pl: PL, connector: PipelineConnector): void {
-  pl.pre.onPass((r, schemaId) => {
-    pl.arrived.push(r);
-    connector.forward(r, schemaId);
+  pl.pre.onPass((arr, schemaId, raw) => {
+    pl.arrived.push(arr);
+    connector.forward(raw, schemaId);
   });
 }
 
@@ -232,7 +236,8 @@ describe("quarantine → Brain approve → downstream arrival", () => {
     // Re-injected → passes A → forwarded to B
     assert.equal(A.arrived.length, 1, "corrected record passed A");
     assert.equal(B.arrived.length, 1, "corrected record reached B");
-    assert.equal((B.arrived[0] as RawRecord).status, "ok");
+    // SCHEMA.fields = ["id", "value", "status"], so index 2 = status
+    assert.equal(B.arrived[0]![2], "ok");
   });
 
   it("Brain reject — record does not reach B", () => {
@@ -302,7 +307,8 @@ describe("quarantine → Brain approve → downstream arrival", () => {
 
     assert.equal(A.arrived.length, 1, "re-injected record passed A");
     assert.equal(B.arrived.length, 1, "re-injected record reached B");
-    assert.equal((A.arrived[0] as RawRecord).id, "fixed");
+    // SCHEMA.fields = ["id", "value", "status"], so index 0 = id
+    assert.equal(A.arrived[0]![0], "fixed");
 
     brain.stop();
   });

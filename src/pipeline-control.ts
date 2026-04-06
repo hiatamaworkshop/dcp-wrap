@@ -79,7 +79,8 @@ export class PipelineControl {
   private onApprove: QuarantineApproveHandler | null = null;
   private onReject: QuarantineRejectHandler | null = null;
   private connectorRef: PipelineConnector | null = null;
-  private connectorResolver: ((pipelineId: string) => Preprocessor | undefined) | null = null;
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  private connectorResolver: ((pipelineId: string) => Preprocessor<any> | undefined) | null = null;
 
   private readonly handler: (msg: OutboundMessage) => void;
 
@@ -108,7 +109,8 @@ export class PipelineControl {
    */
   setConnector(
     connector: PipelineConnector,
-    resolver: (pipelineId: string) => Preprocessor | undefined,
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    resolver: (pipelineId: string) => Preprocessor<any> | undefined,
   ): void {
     this.connectorRef = connector;
     this.connectorResolver = resolver;
@@ -184,7 +186,8 @@ export class PipelineControl {
         if (Array.isArray(dest)) {
           const targets = dest
             .map((id) => this.connectorResolver!(id))
-            .filter((p): p is Preprocessor => p !== undefined);
+            // eslint-disable-next-line @typescript-eslint/no-explicit-any
+            .filter((p): p is Preprocessor<any> => p !== undefined);
           if (targets.length > 0) connectorTable.set(schemaId, targets.length === 1 ? targets[0] : targets);
         } else {
           const target = this.connectorResolver(dest);

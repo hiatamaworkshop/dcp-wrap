@@ -28,6 +28,8 @@ import { SimpleMonitor, MessagePool } from "./monitor.js";
 import { PipelineControl } from "./pipeline-control.js";
 import { StCollector } from "./st-collector.js";
 import { Preprocessor } from "./preprocessor.js";
+import { SchemaCache } from "./schema-cache.js";
+import { JSONAdapter } from "./adapters/json-adapter.js";
 import { Gate } from "./gate.js";
 import { IPool } from "./i-pool.js";
 import { Bot } from "./bot.js";
@@ -87,9 +89,8 @@ const collector = new StCollector(monitor, { windowMs: 500 });
 const ipool     = new IPool({ capacity: 64 });
 const bot       = new Bot(monitor, postbox, ipool, PROFILE);
 
-const pre = new Preprocessor(registry, postbox, ctrl, {
+const pre = new Preprocessor(new JSONAdapter("$schema"), new SchemaCache(registry), postbox, ctrl, {
   pipelineId: "pipeline://demo-01",
-  schemaField: "$schema",
 });
 
 // ── 4. $ST observer (log only) ────────────────────────────────────────────────
@@ -109,15 +110,16 @@ monitor.subscribe("st_f", (msg) => {
 let passed = 0, quarantined = 0, dropped = 0;
 let rowIndex = 0;
 
-pre.onPass((record, schemaId) => {
+pre.onPass((array, schemaId) => {
   passed++;
-  console.log(`[PASS]       schemaId=${schemaId}  summary="${String(record.summary).slice(0, 40)}"`);
+  // KNOWLEDGE_SCHEMA.fields[0] = "summary"
+  console.log(`[PASS]       schemaId=${schemaId}  summary="${String(array[0]).slice(0, 40)}"`);
 
   const entry = registry.get(schemaId);
   if (!entry) return;
 
-  const row = entry.schema.fields.map((f) => {
-    const v = record[f];
+  // array is already positional — normalize null values to "-"
+  const row = array.map((v) => {
     if (v == null) return "-";
     if (Array.isArray(v)) return v.join(",") || "-";
     return v;
@@ -194,7 +196,7 @@ for (const record of records) {
   } else {
     toProcess = record;
   }
-  pre.process(toProcess);
+  pre.process(toProcess as Record<string, unknown>);
 }
 
 // ── 8. Stop — flush $ST, drain IPool ─────────────────────────────────────────

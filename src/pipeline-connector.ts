@@ -35,7 +35,6 @@
  */
 
 import type { Preprocessor } from "./preprocessor.js";
-import type { RawRecord } from "./preprocessor.js";
 
 // ── Types ─────────────────────────────────────────────────────────────────────
 
@@ -44,13 +43,14 @@ import type { RawRecord } from "./preprocessor.js";
  * schemaId (or "*") → downstream Preprocessor instance(s).
  * Use an array for fanout (1:N delivery).
  */
-export type ConnectorTable = Map<string, Preprocessor | Preprocessor[]>;
+// eslint-disable-next-line @typescript-eslint/no-explicit-any
+export type ConnectorTable = Map<string, Preprocessor<any> | Preprocessor<any>[]>;
 
 /**
  * Called when a record has no registered destination and is dropped.
  * Optional — default is silent drop.
  */
-export type ConnectorDropHandler = (record: RawRecord, schemaId: string) => void;
+export type ConnectorDropHandler = (record: unknown, schemaId: string) => void;
 
 // ── PipelineConnector ─────────────────────────────────────────────────────────
 
@@ -72,7 +72,8 @@ export class PipelineConnector {
    *
    * Calling register() again with the same schemaId replaces the previous entry.
    */
-  register(schemaId: string, target: Preprocessor | Preprocessor[]): void {
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  register(schemaId: string, target: Preprocessor<any> | Preprocessor<any>[]): void {
     this.table.set(schemaId, target);
   }
 
@@ -122,16 +123,18 @@ export class PipelineConnector {
    * The downstream Preprocessor.process() applies its own schema validation
    * independently (re-validation is intentional: each pipeline owns its rules).
    */
-  forward(record: RawRecord, schemaId: string): void {
+  forward(record: unknown, schemaId: string): void {
     const target = this.resolve(schemaId);
     if (!target) {
       this.dropHandler?.(record, schemaId);
       return;
     }
     if (Array.isArray(target)) {
-      for (const t of target) t.process(record);
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      for (const t of target) (t as Preprocessor<any>).process(record as any);
     } else {
-      target.process(record);
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      (target as Preprocessor<any>).process(record as any);
     }
   }
 

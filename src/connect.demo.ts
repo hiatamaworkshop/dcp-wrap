@@ -33,6 +33,8 @@ import { SimpleMonitor, MessagePool }         from "./monitor.js";
 import { PipelineControl }                    from "./pipeline-control.js";
 import { StCollector }                        from "./st-collector.js";
 import { Preprocessor }                       from "./preprocessor.js";
+import { SchemaCache }                        from "./schema-cache.js";
+import { JSONAdapter }                        from "./adapters/json-adapter.js";
 import { Gate }                               from "./gate.js";
 import { PipelineConnector }                  from "./pipeline-connector.js";
 import type { DcpSchemaDef }                  from "./types.js";
@@ -65,7 +67,7 @@ const SCHEMA: DcpSchemaDef = {
 
 interface Pipeline {
   id:        string;
-  pre:       Preprocessor;
+  pre:       Preprocessor<Record<string, unknown>>;
   gate:      Gate;
   collector: StCollector;
   monitor:   SimpleMonitor;
@@ -85,9 +87,8 @@ function buildPipeline(id: string, gateMode: ValidationMode): Pipeline {
   const gate      = new Gate(registry, { defaultMode: gateMode, monitor });
   gate.onSchemaHeader(SCHEMA.id);
   const collector = new StCollector(monitor, { windowMs: 500 });
-  const pre       = new Preprocessor(registry, postbox, ctrl, {
+  const pre       = new Preprocessor(new JSONAdapter("$schema"), new SchemaCache(registry), postbox, ctrl, {
     pipelineId: id,
-    schemaField: "$schema",
   });
 
   const stats = { passed: 0, quarantined: 0, dropped: 0 };
@@ -119,19 +120,19 @@ pA.ctrl.setConnector(connector, (id) => pipelineMap.get(id));
 
 let rowIndexA = 0;
 
-pA.pre.onPass((record, schemaId) => {
+pA.pre.onPass((array, schemaId, raw) => {
   pA.stats.passed++;
 
-  const row = SCHEMA.fields.map((f) => {
-    const v = (record as RawRecord)[f];
+  // array is already positional — normalize null values to "-"
+  const row = array.map((v) => {
     if (v == null) return "-";
     if (Array.isArray(v)) return (v as unknown[]).join(",") || "-";
     return v;
   });
   pA.gate.process(schemaId, SCHEMA.fields, row, rowIndexA++);
 
-  // Forward to PipelineB via connector (flag mode: all rows forwarded)
-  connector.forward(record as RawRecord, schemaId);
+  // Forward raw record to PipelineB via connector
+  connector.forward(raw, schemaId);
 });
 
 pA.pre.onDrop((_record, _reason) => { pA.stats.dropped++; });
@@ -160,11 +161,11 @@ pA.postbox.subscribeInbound("quarantine", (msg) => {
 
 let rowIndexB = 0;
 
-pB.pre.onPass((record, schemaId) => {
+pB.pre.onPass((array, schemaId) => {
   pB.stats.passed++;
 
-  const row = SCHEMA.fields.map((f) => {
-    const v = (record as RawRecord)[f];
+  // array is already positional — normalize null values to "-"
+  const row = array.map((v) => {
     if (v == null) return "-";
     if (Array.isArray(v)) return (v as unknown[]).join(",") || "-";
     return v;
@@ -234,7 +235,7 @@ for (const record of records) {
   } else {
     toProcess = record;
   }
-  pA.pre.process(toProcess);
+  pA.pre.process(toProcess as Record<string, unknown>);
 }
 
 setTimeout(() => {

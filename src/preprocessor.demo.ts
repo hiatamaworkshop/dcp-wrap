@@ -17,11 +17,13 @@ import { join, dirname } from "node:path";
 import { fileURLToPath } from "node:url";
 
 import { SchemaRegistry } from "./registry.js";
+import { SchemaCache } from "./schema-cache.js";
 import { PostBox } from "./postbox.js";
 import { RoutingLayer } from "./router.js";
 import { MessagePool } from "./monitor.js";
 import { PipelineControl } from "./pipeline-control.js";
 import { Preprocessor } from "./preprocessor.js";
+import { JSONAdapter } from "./adapters/json-adapter.js";
 import type { DcpSchemaDef } from "./types.js";
 import type { QuarantinePayload } from "./postbox.js";
 
@@ -53,9 +55,10 @@ const pool     = new MessagePool();
 const router   = new RoutingLayer(pool, { receive: () => {} });
 const ctrl     = new PipelineControl("pipeline://demo-01", postbox, router);
 
-const pre = new Preprocessor(registry, postbox, ctrl, {
+const adapter = new JSONAdapter("$schema");
+const cache   = new SchemaCache(registry);
+const pre = new Preprocessor(adapter, cache, postbox, ctrl, {
   pipelineId: "pipeline://demo-01",
-  schemaField: "$schema",
 });
 
 // ── 3. Counters & handlers ────────────────────────────────────────────────────
@@ -64,9 +67,10 @@ let passed      = 0;
 let quarantined = 0;
 let dropped     = 0;
 
-pre.onPass((record, schemaId) => {
+pre.onPass((array, schemaId) => {
   passed++;
-  console.log(`[PASS]       schemaId=${schemaId}  summary="${(record as Record<string,unknown>).summary}"`);
+  // KNOWLEDGE_SCHEMA.fields = ["summary","tags","content","flags","importance"], index 0 = summary
+  console.log(`[PASS]       schemaId=${schemaId}  summary="${array[0]}"`);
 });
 
 pre.onDrop((record, reason) => {
@@ -149,7 +153,7 @@ for (const record of records) {
   } else {
     toProcess = record;
   }
-  pre.process(toProcess);
+  pre.process(toProcess as Record<string, unknown>);
 }
 
 // ── 5. Summary ────────────────────────────────────────────────────────────────

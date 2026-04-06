@@ -1,45 +1,43 @@
 /**
- * Preprocessor — JSON record → pipeline gate.
+ * Preprocessor<T> — Adapter ベースのパイプラインエントリガード。
  *
- * Sits upstream of the Encoder. Receives raw JSON objects from the source,
- * checks each against the registered schema, and decides:
+ * SourceAdapter<T> を受け取り、任意のプロトコル/フォーマット (JSON / バイナリ / CSV...) の
+ * 入力を positional array に変換してから下流へ渡す。
  *
- *   Pass      → forward to onPass callback (Encoder entry point)
- *   Drop      → silently discard (structurally corrupt; not recoverable)
- *   Quarantine → push to PostBox; Brain AI inspects and either approves
- *                (re-inject into onPass) or rejects (drop + log)
+ * フロー:
+ *   raw: T
+ *     → adapter.schemaId(raw)             — schemaId 解決 (null → Drop)
+ *     → stop / throttle チェック
+ *     → cache.get(schemaId)               — スキーマ解決 (null → Drop)
+ *     → adapter.decode(raw, schema)       — positional array 生成 (null → Drop)
+ *     → vShadow.validatePositional()      — 型・範囲チェック
+ *     → Pass / Quarantine
  *
- * The Preprocessor does NOT own the encoding pipeline — it only guards the
- * entry point. It is schema-aware but treats schemas as tentative:
- * unknown fields are a schema evolution signal, not a hard error.
+ * 後方互換:
+ *   JSON フォーマットは JSONAdapter + SchemaCache(registry) の組み合わせで従来と等価。
+ *   PassHandler が受け取るのは positional array (unknown[]) と schemaId の組。
  *
  * Quarantine reasons:
- *   unknown_field   — field present in record but absent from schema
- *   missing_field   — required field missing from record
- *   type_mismatch   — field present but wrong JS type
- *   range_violation — numeric field outside min/max bounds
- *
- * Hard drop reasons (not quarantined):
- *   - record is null / not a plain object
- *   - schemaId field missing or not a string
- *   - schema unknown to registry AND auto-register is disabled
+ *   unknown_field   — フィールド数が schema.fieldCount より多い
+ *   missing_field   — フィールド数が schema.fieldCount より少ない / null 含む
+ *   type_mismatch   — 型チェック失敗 (enum 違反含む)
+ *   range_violation — 数値が min/max 範囲外
  */
 
 import { randomUUID } from "node:crypto";
-import type { SchemaRegistry } from "./registry.js";
+import type { SourceAdapter } from "./adapter.js";
+import type { SchemaCache } from "./schema-cache.js";
 import type { PostBox, QuarantineReason } from "./postbox.js";
 import type { PipelineControl } from "./pipeline-control.js";
 
 // ── Types ─────────────────────────────────────────────────────────────────────
 
-/** Raw JSON object arriving at the pipeline ingress. */
-export type RawRecord = Record<string, unknown>;
-
 /**
  * Called when a record passes preprocessing and is ready for encoding.
- * Typically wires to Encoder.encode() or a batch accumulator.
+ * Receives positional array (schema.fields 順)、schemaId、および元の raw input。
+ * raw は PipelineConnector 経由のチェーン転送時に使用する。
  */
-export type PassHandler = (record: RawRecord, schemaId: string) => void;
+export type PassHandler<T = unknown> = (array: unknown[], schemaId: string, raw: T) => void;
 
 /**
  * Called when a record is dropped (corrupt; not quarantinable).
@@ -48,65 +46,55 @@ export type PassHandler = (record: RawRecord, schemaId: string) => void;
 export type DropHandler = (record: unknown, reason: string) => void;
 
 export interface PreprocessorOptions {
-  /** Pipeline instance ID. Used as PostBox pipelineId in quarantine messages. */
+  /** Pipeline instance ID. PostBox quarantine メッセージの pipelineId に使用。 */
   pipelineId: string;
 
   /**
    * If true, records with unknown schemaIds are auto-registered from the record
    * structure via registry.registerFromHeader(). This is permissive mode.
    * Default: false — unknown schema → Drop.
+   *
+   * @deprecated JSONAdapter 固有の動作。Adapter ベースでは cache.get() の結果に委ねる。
+   *             互換性のため残すが、Adapter ベースでは効果なし。
    */
   autoRegister?: boolean;
 
   /**
-   * Fields that identify the schema of an incoming JSON record.
-   * Preprocessor reads record[schemaField] to resolve the schema.
-   * Default: "$schema"
+   * schemaId フィールド名。JSONAdapter との組み合わせ時に使用。
+   * Adapter ベース Preprocessor ではこのオプションは Adapter 側で管理する。
+   * @deprecated 互換性のため残す。
    */
   schemaField?: string;
 }
 
 // ── Preprocessor ─────────────────────────────────────────────────────────────
 
-/**
- * Preprocessor — guards the pipeline entry point.
- *
- * Usage:
- *   const pre = new Preprocessor(registry, postbox, pipelineControl, {
- *     pipelineId: "pipeline://ingest-01",
- *   });
- *   pre.onPass((record, schemaId) => encoder.encode(record, schemaId));
- *   pre.process(rawJsonObject);
- */
-export class Preprocessor {
-  private passHandler: PassHandler | null = null;
+export class Preprocessor<T = unknown> {
+  private passHandler: PassHandler<T> | null = null;
   private dropHandler: DropHandler | null = null;
 
-  private readonly schemaField: string;
-  private readonly autoRegister: boolean;
   private readonly ctrl: PipelineControl;
 
-  // Throttle tracking: schemaId (or undefined for pipeline-wide) → { windowStart, count }
-  private readonly throttleCounters = new Map<string | undefined, { windowStart: number; count: number }>();
+  // Throttle tracking: schemaId → { windowStart, count }
+  private readonly throttleCounters = new Map<string, { windowStart: number; count: number }>();
 
   constructor(
-    private readonly registry: SchemaRegistry,
+    private readonly adapter: SourceAdapter<T>,
+    private readonly cache: SchemaCache,
     private readonly postbox: PostBox,
     pipelineControl: PipelineControl,
     private readonly options: PreprocessorOptions,
   ) {
-    this.schemaField = options.schemaField ?? "$schema";
-    this.autoRegister = options.autoRegister ?? false;
     this.ctrl = pipelineControl;
 
     // Wire Brain AI approve → re-inject into onPass
-    pipelineControl.onQuarantineApprove((quarantineId, record) => {
-      this.reInject(quarantineId, record);
+    pipelineControl.onQuarantineApprove((_quarantineId, record) => {
+      this.reInject(record);
     });
   }
 
-  /** Register the downstream pass handler (typically Encoder.encode). */
-  onPass(handler: PassHandler): void {
+  /** Register the downstream pass handler. */
+  onPass(handler: PassHandler<T>): void {
     this.passHandler = handler;
   }
 
@@ -116,28 +104,20 @@ export class Preprocessor {
   }
 
   /**
-   * Process a single raw JSON record.
-   * Resolves schema, checks fields, and routes to Pass / Drop / Quarantine.
+   * Process a single raw input.
+   * Adapter を通じて schemaId を解決し、decode → validate → Pass / Drop / Quarantine。
    */
-  process(record: unknown): void {
+  process(raw: T): void {
     // ── Pipeline-wide stop check ──────────────────────────────────────────────
     if (this.ctrl.isStopped()) {
-      this.drop(record, "pipeline stopped");
+      this.drop(raw, "pipeline stopped");
       return;
     }
 
-    // ── Hard drop: not a plain object ─────────────────────────────────────────
-    if (!isPlainObject(record)) {
-      this.drop(record, "not a plain object");
-      return;
-    }
-
-    const raw = record as RawRecord;
-
-    // ── Hard drop: no schemaId ────────────────────────────────────────────────
-    const schemaId = raw[this.schemaField];
-    if (typeof schemaId !== "string" || schemaId.trim() === "") {
-      this.drop(raw, `missing or invalid schemaId field: ${this.schemaField}`);
+    // ── schemaId 解決 ─────────────────────────────────────────────────────────
+    const schemaId = this.adapter.schemaId(raw);
+    if (!schemaId) {
+      this.drop(raw, "schemaId unresolvable");
       return;
     }
 
@@ -148,70 +128,74 @@ export class Preprocessor {
     }
 
     // ── Throttle check ────────────────────────────────────────────────────────
-    // getRpsLimit() returns schema-specific cap, falling back to pipeline-wide cap.
     const rpsLimit = this.ctrl.getRpsLimit(schemaId);
     if (rpsLimit !== undefined && this.isThrottled(schemaId, rpsLimit)) {
       this.drop(raw, `throttled: ${schemaId} exceeds ${rpsLimit} rps`);
       return;
     }
 
-    // ── Schema lookup ─────────────────────────────────────────────────────────
-    let entry = this.registry.get(schemaId);
-
+    // ── Schema lookup (cache) ─────────────────────────────────────────────────
+    const entry = this.cache.get(schemaId);
     if (!entry) {
-      if (this.autoRegister) {
-        // Build a synthetic $S header from the record's own keys and auto-register
-        const keys = Object.keys(raw).filter((k) => k !== this.schemaField);
-        const header: unknown[] = ["$S", schemaId, keys.length, ...keys];
-        entry = this.registry.registerFromHeader(header);
-      }
-      if (!entry) {
-        this.drop(raw, `unknown schemaId: ${schemaId}`);
-        return;
-      }
+      this.drop(raw, `unknown schemaId: ${schemaId}`);
+      return;
     }
 
     const { schema, vShadow } = entry;
 
-    // ── Field-level inspection ────────────────────────────────────────────────
-    const recordKeys = new Set(Object.keys(raw).filter((k) => k !== this.schemaField));
-    const schemaFields = new Set(schema.fields);
-
-    // Unknown fields — schema evolution signal
-    const unknownFields = [...recordKeys].filter((k) => !schemaFields.has(k));
-    if (unknownFields.length > 0) {
-      this.quarantine(raw, schemaId, "unknown_field",
-        `unknown fields: ${unknownFields.join(", ")}`);
+    // ── Decode → positional array ─────────────────────────────────────────────
+    const array = this.adapter.decode(raw, schema);
+    if (!array) {
+      this.drop(raw, "decode failed");
       return;
     }
 
-    // Missing required fields — any field in schema not present in record
-    const missingFields = schema.fields.filter((f) => !recordKeys.has(f));
-    if (missingFields.length > 0) {
-      this.quarantine(raw, schemaId, "missing_field",
-        `missing fields: ${missingFields.join(", ")}`);
+    // ── Field count checks ────────────────────────────────────────────────────
+    // JSONAdapter は null を詰めるので、missing はフィールド数ではなく null 値で検出する
+    // unknown フィールド: array が schema.fieldCount より長い場合
+    if (array.length > schema.fieldCount) {
+      this.quarantine(array, schemaId, "unknown_field",
+        `decoded array length ${array.length} exceeds schema fieldCount ${schema.fieldCount}`);
       return;
     }
 
-    // Type / range checks via compiled VShadow
-    const vResult = vShadow.validate(raw);
+    // missing フィールド: array が短い場合 (Adapter が null で埋めない場合)
+    if (array.length < schema.fieldCount) {
+      this.quarantine(array, schemaId, "missing_field",
+        `decoded array length ${array.length} shorter than schema fieldCount ${schema.fieldCount}`);
+      return;
+    }
+
+    // null 値によるフィールド欠落検出 (JSONAdapter のパターン)
+    const missingIndices = array
+      .map((v, i) => (v === null || v === undefined ? schema.fields[i] : null))
+      .filter((f): f is string => f !== null);
+    if (missingIndices.length > 0) {
+      this.quarantine(array, schemaId, "missing_field",
+        `missing fields: ${missingIndices.join(", ")}`);
+      return;
+    }
+
+    // ── VShadow バリデーション ────────────────────────────────────────────────
+    const vResult = vShadow.validatePositional(schema.fields, array);
     if (!vResult.pass) {
       const first = vResult.failures[0];
       const qReason: QuarantineReason =
         (first.reason?.includes("< min") || first.reason?.includes("> max"))
           ? "range_violation" : "type_mismatch";
-      this.quarantine(raw, schemaId, qReason, first.reason ?? `validation failed: ${first.field}`);
+      this.quarantine(array, schemaId, qReason,
+        first.reason ?? `validation failed: ${first.field}`);
       return;
     }
 
     // ── Pass ──────────────────────────────────────────────────────────────────
-    this.passHandler?.(raw, schemaId);
+    this.passHandler?.(array, schemaId, raw);
   }
 
   // ── internals ──────────────────────────────────────────────────────────────
 
   private quarantine(
-    record: RawRecord,
+    array: unknown[],
     schemaId: string,
     reason: QuarantineReason,
     detail: string,
@@ -222,45 +206,29 @@ export class Preprocessor {
       schemaId,
       reason,
       detail,
-      record,
+      record: array,
     });
   }
 
-  private reInject(quarantineId: string, record: unknown): void {
-    // Brain AI approved — re-process with the (possibly corrected) record.
-    // If record is null Brain AI sent no correction; re-inject would re-quarantine,
-    // so we trust Brain AI and forward as-is to onPass using the original schemaId.
-    if (record === null || !isPlainObject(record)) {
-      // No corrected record provided or invalid — skip silently
-      return;
-    }
-    const raw = record as RawRecord;
-    const schemaId = raw[this.schemaField];
-    if (typeof schemaId === "string" && schemaId.trim() !== "") {
-      this.passHandler?.(raw, schemaId);
-    }
-    // If schemaId is still missing after Brain AI correction, drop silently.
-    // (quarantineId logged by Brain AI already; no further action needed here.)
-    void quarantineId;
+  private reInject(record: unknown): void {
+    // Brain AI approved — re-inject as raw T if possible.
+    // correctedRecord は RawRecord (plain object) で来る想定。
+    // Adapter が decode できれば Pass まで再処理する。
+    if (record === null || record === undefined) return;
+    // record を T として process() に投げる (型安全のため unknown 経由)
+    this.process(record as T);
   }
 
   private drop(record: unknown, reason: string): void {
     this.dropHandler?.(record, reason);
-    // default: silent drop
   }
 
-  /**
-   * Token-bucket style 1-second window throttle.
-   * Returns true if the record should be dropped (limit exceeded).
-   * Tracks per schemaId; pipeline-wide limit uses undefined key.
-   */
   private isThrottled(schemaId: string, rpsLimit: number): boolean {
-    const key = schemaId;
     const now = Date.now();
-    let counter = this.throttleCounters.get(key);
+    let counter = this.throttleCounters.get(schemaId);
     if (!counter || now - counter.windowStart >= 1000) {
       counter = { windowStart: now, count: 0 };
-      this.throttleCounters.set(key, counter);
+      this.throttleCounters.set(schemaId, counter);
     }
     if (counter.count >= rpsLimit) return true;
     counter.count++;
@@ -268,8 +236,10 @@ export class Preprocessor {
   }
 }
 
-// ── Helpers ───────────────────────────────────────────────────────────────────
+// ── 後方互換型エイリアス ──────────────────────────────────────────────────────
 
-function isPlainObject(value: unknown): value is Record<string, unknown> {
-  return typeof value === "object" && value !== null && !Array.isArray(value);
-}
+/**
+ * Raw JSON object arriving at the pipeline ingress.
+ * @deprecated 型参照用。Preprocessor<Record<string, unknown>> を使うこと。
+ */
+export type RawRecord = Record<string, unknown>;

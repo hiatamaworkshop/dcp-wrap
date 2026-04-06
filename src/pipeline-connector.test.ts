@@ -15,7 +15,9 @@ import { PipelineControl }    from "./pipeline-control.js";
 import { PostBox }            from "./postbox.js";
 import { RoutingLayer }       from "./router.js";
 import { SchemaRegistry }     from "./registry.js";
+import { SchemaCache }        from "./schema-cache.js";
 import { Preprocessor }       from "./preprocessor.js";
+import { JSONAdapter }        from "./adapters/json-adapter.js";
 import { SimpleMonitor, MessagePool } from "./monitor.js";
 import type { RawRecord }     from "./preprocessor.js";
 import type { DcpSchemaDef }  from "./types.js";
@@ -42,7 +44,9 @@ function makePre(pipelineId: string) {
   const postbox = new PostBox();
   const router  = new RoutingLayer(new MessagePool(), { receive: () => {} });
   const ctrl    = new PipelineControl(pipelineId, postbox, router);
-  const pre     = new Preprocessor(registry, postbox, ctrl, { pipelineId, schemaField: "$schema" });
+  const adapter = new JSONAdapter("$schema");
+  const cache   = new SchemaCache(registry);
+  const pre     = new Preprocessor(adapter, cache, postbox, ctrl, { pipelineId });
   return { pre, ctrl, postbox, router };
 }
 
@@ -53,14 +57,15 @@ describe("PipelineConnector", () => {
     const connector = new PipelineConnector();
     const { pre } = makePre("pipeline://B");
 
-    const received: RawRecord[] = [];
-    pre.onPass((r) => received.push(r));
+    const received: unknown[][] = [];
+    pre.onPass((arr) => received.push(arr));
 
     connector.register(SCHEMA.id, pre);
     connector.forward(makeRecord(), SCHEMA.id);
 
     assert.equal(received.length, 1);
-    assert.equal(received[0]!.value, "hello");
+    // SCHEMA.fields = ["value"], so index 0 = value
+    assert.equal(received[0]![0], "hello");
   });
 
   it("fanout delivers to all targets", () => {
@@ -68,8 +73,8 @@ describe("PipelineConnector", () => {
     const b = makePre("pipeline://B");
     const c = makePre("pipeline://C");
 
-    const recB: RawRecord[] = [];
-    const recC: RawRecord[] = [];
+    const recB: unknown[][] = [];
+    const recC: unknown[][] = [];
     b.pre.onPass((r) => recB.push(r));
     c.pre.onPass((r) => recC.push(r));
 
@@ -84,8 +89,8 @@ describe("PipelineConnector", () => {
     const connector = new PipelineConnector();
     const { pre } = makePre("pipeline://B");
 
-    const received: RawRecord[] = [];
-    pre.onPass((r) => received.push(r));
+    const received: unknown[][] = [];
+    pre.onPass((arr) => received.push(arr));
 
     connector.register("*", pre);
     connector.forward(makeRecord(), SCHEMA.id);  // no exact match → wildcard
@@ -98,8 +103,8 @@ describe("PipelineConnector", () => {
     const exact = makePre("pipeline://exact");
     const wild  = makePre("pipeline://wild");
 
-    const recExact: RawRecord[] = [];
-    const recWild: RawRecord[]  = [];
+    const recExact: unknown[][] = [];
+    const recWild: unknown[][]  = [];
     exact.pre.onPass((r) => recExact.push(r));
     wild.pre.onPass((r)  => recWild.push(r));
 
@@ -124,8 +129,8 @@ describe("PipelineConnector", () => {
     const b = makePre("pipeline://B");
     const c = makePre("pipeline://C");
 
-    const recB: RawRecord[] = [];
-    const recC: RawRecord[] = [];
+    const recB: unknown[][] = [];
+    const recC: unknown[][] = [];
     b.pre.onPass((r) => recB.push(r));
     c.pre.onPass((r) => recC.push(r));
 
@@ -158,8 +163,8 @@ describe("PipelineControl + PipelineConnector routing_update", () => {
     ]);
     a.ctrl.setConnector(connector, (id) => pipelineMap.get(id));
 
-    const recB: RawRecord[] = [];
-    const recC: RawRecord[] = [];
+    const recB: unknown[][] = [];
+    const recC: unknown[][] = [];
     b.pre.onPass((r) => recB.push(r));
     c.pre.onPass((r) => recC.push(r));
 
@@ -189,8 +194,8 @@ describe("PipelineControl + PipelineConnector routing_update", () => {
     ]);
     a.ctrl.setConnector(connector, (id) => pipelineMap.get(id));
 
-    const recB: RawRecord[] = [];
-    const recC: RawRecord[] = [];
+    const recB: unknown[][] = [];
+    const recC: unknown[][] = [];
     b.pre.onPass((r) => recB.push(r));
     c.pre.onPass((r) => recC.push(r));
 
@@ -208,9 +213,9 @@ describe("PipelineControl + PipelineConnector routing_update", () => {
 describe("Preprocessor stop and throttle", () => {
   it("drops all records when pipeline is stopped", () => {
     const { pre, postbox } = makePre("pipeline://A");
-    const passed: RawRecord[] = [];
+    const passed: unknown[][] = [];
     const dropped: unknown[]  = [];
-    pre.onPass((r) => passed.push(r));
+    pre.onPass((arr) => passed.push(arr));
     pre.onDrop((r) => dropped.push(r));
 
     postbox.issueStop("pipeline://A");  // pipeline-wide stop
@@ -224,9 +229,9 @@ describe("Preprocessor stop and throttle", () => {
 
   it("drops records for a stopped schema only", () => {
     const { pre, postbox } = makePre("pipeline://A");
-    const passed: RawRecord[] = [];
+    const passed: unknown[][] = [];
     const dropped: unknown[]  = [];
-    pre.onPass((r) => passed.push(r));
+    pre.onPass((arr) => passed.push(arr));
     pre.onDrop((r) => dropped.push(r));
 
     postbox.issueStop("pipeline://A", SCHEMA.id);  // schema-level stop
@@ -239,9 +244,9 @@ describe("Preprocessor stop and throttle", () => {
 
   it("enforces rps throttle — drops records beyond limit within 1s window", () => {
     const { pre, postbox } = makePre("pipeline://A");
-    const passed: RawRecord[] = [];
+    const passed: unknown[][] = [];
     const dropped: unknown[]  = [];
-    pre.onPass((r) => passed.push(r));
+    pre.onPass((arr) => passed.push(arr));
     pre.onDrop((r) => dropped.push(r));
 
     postbox.issueThrottle("pipeline://A", 2, SCHEMA.id);  // 2 rps cap

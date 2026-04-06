@@ -1188,5 +1188,186 @@ function wireForward(pl: PL, connector: PipelineConnector): void {
 | Bot (phi3:mini 実運用) | 設計済み・stub 実装 | `RuleBasedLlm` でテスト可、実 LLM 接続は将来 |
 | TrialCollector / ZISV | 未実装 | `$R` ファンアウト実装後に着手 |
 | ProxyExporter (クロスプロセス) | 未実装 | 同一プロセス内 PipelineConnector は実装済み |
+
+---
+
+## 設計課題: Preprocessor の JSON 前提問題
+
+### 現状の制約
+
+現在の Preprocessor は JavaScript オブジェクト（= JSON パース後の状態）を前提として設計されている。
+
+```
+src/preprocessor.ts:36  RawRecord = Record<string, unknown>   // JS オブジェクト前提
+src/preprocessor.ts:130 isPlainObject()                       // オブジェクト以外は即 Drop
+src/preprocessor.ts:138 raw[this.schemaField]                 // キー "$schema" でスキーマID を読む
+```
+
+MQTT バイナリ / CBOR / 独自バイナリが来た場合、**L130 の isPlainObject() で即 Drop** される。
+JSON を中間フォーマットにすると「一度キー付きオブジェクトを生成 → 位置配列に変換」という無駄が生じ、IoT 高頻度ストリームでは性能劣化の原因になる。
+
+### IoT 入力の現実
+
+```
+IoTデバイス
+  ├── MQTT broker    → binary payload (Protocol Buffer / MessagePack / 独自)
+  ├── CoAP           → CBOR
+  ├── HTTP/REST      → JSON
+  └── raw TCP        → 独自バイナリ
+```
+
+これらを現状の `Preprocessor.process()` に直接 feed することはできない。
+
+### 設計案の比較
+
+**案A: Protocol Adapter 層を Preprocessor 手前に置く（Preprocessor 変更なし）**
+
+```
+MQTT binary → MQTTAdapter.decode() → RawRecord → Preprocessor.process()
+CBOR        → CBORAdapter.decode() → RawRecord → Preprocessor.process()
+JSON        → (そのまま)           → RawRecord → Preprocessor.process()
+```
+
+- Preprocessor のコアロジック（Quarantine / Throttle / Stop 制御）は触らない
+- 実装コストが低い
+- **問題: 依然として JSON オブジェクトを中間フォーマットとして経由する**
+
+**案B: Adapter インターフェース化 + 直接 positional array 出力（理想形）**
+
+```typescript
+interface SourceAdapter<T> {
+  schemaId(raw: T): string
+  decode(raw: T, schema: Schema): unknown[]   // → 直接 positional array
+  quarantineReason(raw: T): QuarantineReason | null
+}
+```
+
+```
+MQTT binary → MQTTAdapter → positional array → Gate($V)
+CBOR        → CBORAdapter → positional array → Gate($V)
+JSON        → JSONAdapter → positional array → Gate($V)
+```
+
+- JSON 経由なし
+- DCP の本質（「最初から位置で意味を持たせる」）と一致
+- **問題: Preprocessor が持つ Quarantine / Throttle / Stop 制御を Adapter と分離する必要がある**
+  → フィールド監査・型チェックは Adapter 側、制御フローは共通コアに集約する再設計が必要
+
+### 影響範囲
+
+案B を採用する場合、以下が変更対象になる：
+
+| ファイル | 変更内容 |
+|---------|---------|
+| `src/preprocessor.ts` | `RawRecord` → `SourceAdapter<T>` ベースに再設計 |
+| `src/pipeline-chain.test.ts` | `wireForward()` の入力型変更 |
+| `src/validation.test.ts` | Preprocessor 統合テストの入力形式変更 |
+
+### 現時点の方針
+
+**設計課題として記録。実装は着手しない。**
+
+Preprocessor の JSON 前提は現状の用途（JSON/CSV ソース）では問題ない。
+IoT / MQTT 対応が必要になった時点で案B の方向で再設計する。
+その際は Preprocessor を「Protocol-agnostic な制御コア」と「Protocol Adapter」に分離するアーキテクチャを採用する。
 | Pipeline Registry (pipelineId → Preprocessor 解決) | 未実装 | `ctrl.setConnector(connector, resolverFn)` の resolverFn は呼び出し側が担う |
 | $ST 統計エンジン差し替え | 未実装 | 現在は固定ウィンドウ + 単純カウント |
+
+---
+
+## 理想アーキテクチャ: IoT ストリーム対応 Ingestor 設計
+
+### 全体像
+
+```
+[MQTT Broker]
+[CoAP Server]  → Protocol Adapter → [Load Balancer]
+[HTTP/REST]                               ↓
+[raw TCP]                    ┌─────────────────────────┐
+                             │  IngestorX-1            │
+                             │  IngestorX-2  ──────────┼→ channel[schemaId]
+                             │  IngestorX-3            │
+                             └─────────────────────────┘
+                                          ↓
+                             [Preprocessor Core]
+                               ├── フィールド監査
+                               ├── Quarantine / Throttle / Stop
+                               └── onPass → Pipeline ($V / $R / $ST)
+```
+
+### Ingestor の責務
+
+Ingestor がやることは3つだけ。判断はしない。
+
+```
+IngestorX.receive(rawBytes, source):
+  1. source → schemaId  (スキーマキャッシュ参照)
+  2. schemaId → Schema  (インメモリ TTL キャッシュ)
+  3. rawBytes → positional array  (スキーマの field 定義に従って直接変換)
+  4. channel[schemaId].push(array)
+```
+
+**形式はIngestor、品質はPreprocessor。** この境界を越えない。
+
+### スキーマキャッシュ (インメモリ TTL)
+
+```
+SchemaCache
+  ├── get(schemaId): Schema | null   ← miss → registry fetch → set with TTL
+  ├── set(schemaId, schema, ttl)
+  └── evict()                        ← TTL切れで自動削除（使われていないスキーマは消える）
+```
+
+スキーマ自体が消えるわけではなく、キャッシュが消える。次アクセス時に再フェッチ。
+スキーマは**事前登録前提**。未登録 schemaId が来た場合は Drop（Ingestor レベル）。
+
+### プロトコル差の吸収
+
+プロトコル種別は Protocol Adapter が吸収する。IngestorX 本体は共通コードで動く。
+
+```
+MQTTAdapter  ─┐
+CoAPAdapter  ─┼→ IngestorX（共通）→ channel[schemaId] → Preprocessor
+HTTPAdapter  ─┘
+```
+
+Adapter の責務は「バイトを受け取り、IngestorX が扱える形で渡す」だけ。
+
+### 並列化の考え方
+
+Ingestor の並列化はプロトコル種別ではなく**スループット対応の水平スケール**。
+
+```
+[MQTT Broker] → [Load Balancer] → IngestorX-1 ─┐
+                                → IngestorX-2 ─┼→ channel["sensor:v1"]
+                                → IngestorX-3 ─┘
+```
+
+各 IngestorX は同一コード。スキーマキャッシュはインスタンスごとに独立（TTL で整合性確保）。
+
+**常駐数は 3 が基本:**
+
+| 台数 | 問題 |
+|------|------|
+| 1 | SPOF |
+| 2 | 1台落ちると残り1台が全負荷 |
+| 3 | 1台落ちても残り2台で 2/3 負荷。ローリング再起動も無停止 |
+
+Kubernetes の `PodDisruptionBudget minAvailable: 2` と同じ発想。
+
+### $R との関係
+
+Ingestor は `$R`（ルーティング）を知らない。
+
+```
+Ingestor → channel["sensor:v1"] → Preprocessor → $R → pipeline-A or pipeline-B
+```
+
+Ingestor が行う「schemaId への振り分け」はデータ形式の分類であり、パイプラインへのルーティング判断ではない。`$R` は Preprocessor の下流にある。
+
+### 現時点の方針
+
+**設計記録。実装は IoT 対応フェーズで着手。**
+
+現状の `Preprocessor.process(RawRecord)` は JSON/CSV ソース向けに動作している。
+IoT ストリーム対応時は本セクションの設計を起点に Ingestor 層を追加する。

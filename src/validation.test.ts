@@ -12,10 +12,12 @@ import assert from "node:assert/strict";
 
 import { VShadow, vShadowFromSchema } from "./validator.js";
 import { SchemaRegistry }             from "./registry.js";
+import { SchemaCache }                from "./schema-cache.js";
 import { PostBox }                    from "./postbox.js";
 import { RoutingLayer }               from "./router.js";
 import { PipelineControl }            from "./pipeline-control.js";
 import { Preprocessor }               from "./preprocessor.js";
+import { JSONAdapter }                from "./adapters/json-adapter.js";
 import { MessagePool }                from "./monitor.js";
 import type { DcpSchemaDef }          from "./types.js";
 import type { InboundMessage }        from "./postbox.js";
@@ -44,9 +46,10 @@ function makeEnv(schema: DcpSchemaDef = SENSOR_SCHEMA) {
   const postbox  = new PostBox();
   const router   = new RoutingLayer(new MessagePool(), { receive: () => {} });
   const ctrl     = new PipelineControl("pipeline://test", postbox, router, registry);
-  const pre      = new Preprocessor(registry, postbox, ctrl, {
+  const adapter  = new JSONAdapter("$schema");
+  const cache    = new SchemaCache(registry);
+  const pre      = new Preprocessor(adapter, cache, postbox, ctrl, {
     pipelineId: "pipeline://test",
-    schemaField: "$schema",
   });
   return { registry, postbox, ctrl, pre };
 }
@@ -150,8 +153,8 @@ describe("VShadow", () => {
 describe("Preprocessor validation integration", () => {
   it("passes a valid record to onPass", () => {
     const { pre } = makeEnv();
-    const passed: RawRecord[] = [];
-    pre.onPass((r) => passed.push(r));
+    const passed: unknown[][] = [];
+    pre.onPass((arr) => passed.push(arr));
     pre.process(validRecord());
     assert.equal(passed.length, 1);
   });
@@ -161,8 +164,8 @@ describe("Preprocessor validation integration", () => {
     const quarantined: InboundMessage[] = [];
     postbox.subscribeInbound("quarantine", (m) => quarantined.push(m));
 
-    const passed: RawRecord[] = [];
-    pre.onPass((r) => passed.push(r));
+    const passed: unknown[][] = [];
+    pre.onPass((arr) => passed.push(arr));
 
     pre.process(validRecord({ temp: "hot" }));
 
@@ -205,8 +208,8 @@ describe("validation_update (Brain AI runtime constraint update)", () => {
     const quarantined: InboundMessage[] = [];
     postbox.subscribeInbound("quarantine", (m) => quarantined.push(m));
 
-    const passed: RawRecord[] = [];
-    pre.onPass((r) => passed.push(r));
+    const passed: unknown[][] = [];
+    pre.onPass((arr) => passed.push(arr));
 
     // Before update: temp=80 is within [-50, 150] → passes
     pre.process(validRecord({ temp: 80 }));
@@ -229,8 +232,8 @@ describe("validation_update (Brain AI runtime constraint update)", () => {
 
   it("loosens constraint and previously rejected record now passes", () => {
     const { pre, postbox } = makeEnv();
-    const passed: RawRecord[] = [];
-    pre.onPass((r) => passed.push(r));
+    const passed: unknown[][] = [];
+    pre.onPass((arr) => passed.push(arr));
 
     // Before update: temp=200 exceeds max 150 → quarantine
     const quarantined: InboundMessage[] = [];
@@ -252,8 +255,8 @@ describe("validation_update (Brain AI runtime constraint update)", () => {
 
   it("update to unknown schemaId is a no-op — existing shadow unchanged", () => {
     const { pre, postbox } = makeEnv();
-    const passed: RawRecord[] = [];
-    pre.onPass((r) => passed.push(r));
+    const passed: unknown[][] = [];
+    pre.onPass((arr) => passed.push(arr));
 
     // Issue update for a schema that doesn't exist in registry
     postbox.issueValidationUpdate("pipeline://test", "nonexistent:v1", {
