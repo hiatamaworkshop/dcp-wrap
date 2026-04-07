@@ -157,9 +157,56 @@ n tick ごとに $ST-brain サマリーを Brain のプロンプトに注入 →
 
 ### 実装スコープ (段階的)
 
-1. `$ST-brain` チャンネルの追加 — 聖典/LLM 差分の記録のみ
-2. シャドウ RuleBase の weight 構造設計 (`shadow-rulebase:v1` バージョニング)
-3. weight フィードバックループ + スナップショット永続化
+1. `$ST-brain` チャンネルの追加 — 聖典/LLM 差分の記録のみ ✓ (2026-04-07)
+2. シャドウ RuleBase の weight 構造設計 (`shadow-rulebase:v1` バージョニング) ✓ (2026-04-07)
+3. weight フィードバックループ + スナップショット永続化 (未実装)
+
+### ShadowRuleBrain 実装詳細 (2026-04-07)
+
+**ファイル**: `dcp-minecraft/server/src/shadow-rule-brain.ts`
+
+#### Weight モデル
+
+各 `ActionKind` (rerouteSchema / throttle / stop / ...) ごとに weight: 0.0 → 1.0 を保持。
+
+| イベント | 変化量 |
+|---------|--------|
+| Brain と聖典が一致 (aligned) | `+0.05 × aligned count` |
+| Brain と聖典が乖離 (diverged) | `-0.08 × diverged count` |
+| アクションなし tick (idle) | `-0.01` (全アクション) |
+
+初期値は 0.5 (中立)。`AUTONOMOUS_THRESHOLD = 0.70` を超えると自律判断可能フラグが立つ。
+
+#### フィードバックループ
+
+```
+BrainCollector (10s flush) → StBrainRow
+  → monitor.subscribe("st_brain") → ShadowRuleBrain.absorb(canonAction, llmAction, aligned, diverged)
+  → weight 更新
+  → [$SHADOW] ログ出力
+```
+
+#### ログ例
+
+```
+[$ST-brain] SUMMARY schema=combat:v1  aligned=8  diverged=3  diverge_rate=0.273  top_llm=throttle  top_canon=rerouteSchema
+[$SHADOW] ver=shadow-rulebase:v1  ticks=42  rerouteSchema=0.63  throttle=0.37
+```
+
+#### スナップショット
+
+```typescript
+const snap = shadowBrain.snapshot();
+// { version: "shadow-rulebase:v1", ts: ..., weights: {...}, tickCount: 42 }
+
+shadowBrain.loadSnapshot(snap);
+// バージョンは自動で v2 に昇格
+```
+
+#### 次フェーズ: スナップショット永続化
+
+`snapshot()` の結果を `config/shadow-snapshot.json` に定期保存し、
+起動時に `loadSnapshot()` で復元することで学習を引き継ぐ。
 
 ---
 
