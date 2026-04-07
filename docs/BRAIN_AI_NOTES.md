@@ -96,6 +96,73 @@ const stripped = text.replace(/^```(?:json)?\s*/i, "").replace(/\s*```$/, "").tr
 
 ---
 
+## 8. 聖典 / シャドウ RuleBase + Brain 協調アーキテクチャ (設計案)
+
+### 設計の核心
+
+```
+聖典 GameRuleBrain  — 変更不可の基準値 (初期シード)
+シャドウ RuleBase   — Brain の判断を吸収して weight が動的に変化
+Brain (LLM)         — 未知パターンの判断主体 + シャドウへのスナップショッター
+```
+
+Brain はシャドウを「育てる」存在。未知に当たったときだけ起動し、判断をシャドウに蒸留していく。
+シャドウが成熟するほど Brain の呼び出し頻度が自然に減少 → コスト・レイテンシが削減される。
+
+### ライフサイクル
+
+```
+Phase 1: 聖典固定 + シャドウ展開 + Brain 協調
+  聖典  → 基準値、変更不可
+  シャドウ → Brain の判断傾向を weight として吸収
+  Brain → 判断主体、$ST-brain に記録
+
+Phase 2: シャドウが成熟
+  $ST-brain の乖離率が十分低下
+  シャドウ単独でパフォーマンスが出ている
+
+Phase 3: バージョニング
+  シャドウ v1 → スナップショット保存
+  シャドウ v2 → 新シャドウとして継続
+  → 聖典の更新は不要、スナップショットの永続化だけでよい
+```
+
+聖典は「コールドスタート問題を解く初期値」。昇格判定も不要。ロールバックも自然にできる。
+
+### $ST-brain メトリクス設計
+
+三者 (聖典 / シャドウ / Brain) の差分を定期集計する新チャンネル:
+
+```
+[$ST-brain] schema=combat:v1  aligned=12  diverged=3  diverge_rate=0.200
+[$ST-brain] llm_action=rerouteSchema  rule_action=throttle  count=3
+```
+
+| フィールド | 意味 |
+|-----------|------|
+| `aligned` | 聖典と Brain が一致した tick 数 |
+| `diverged` | 聖典と Brain が乖離した tick 数 |
+| `diverge_rate` | `diverged / (aligned + diverged)` |
+| `llm_action` | Brain が選んだアクション種別 |
+| `rule_action` | 聖典が選んだアクション種別 |
+
+n tick ごとに $ST-brain サマリーを Brain のプロンプトに注入 → セルフキャリブレーション。
+
+### 「正解」問題
+
+現時点では正解ラベルは決定不可能。ただし:
+- 乖離の記録と可視化は今すぐできる
+- 将来: rerouteSchema 後に fail_rate が下がった → そのアクションが有効だった、という遅延フィードバックで正解に近づける
+- 乖離率を下げること自体を目標にしない (Brain の「正しい反論」も記録する)
+
+### 実装スコープ (段階的)
+
+1. `$ST-brain` チャンネルの追加 — 聖典/LLM 差分の記録のみ
+2. シャドウ RuleBase の weight 構造設計 (`shadow-rulebase:v1` バージョニング)
+3. weight フィードバックループ + スナップショット永続化
+
+---
+
 ## 7. 効果確認済みの変更 (2026-04-07)
 
 | 問題 | 対策 | 結果 |

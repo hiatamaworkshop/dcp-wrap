@@ -24,6 +24,7 @@ import Anthropic from "@anthropic-ai/sdk";
 import type { IPool } from "./i-pool.js";
 import type { IPacket, AgentProfile } from "./types.js";
 import type { PostBox, QuarantineApprovePayload, QuarantineRejectPayload, QuarantinePayload } from "./postbox.js";
+import type { Monitor } from "./monitor.js";
 
 // ── Brain adapter interface ───────────────────────────────────────────────────
 
@@ -224,28 +225,57 @@ export class ClaudeBrain implements BrainAdapter {
 // ── Brain ─────────────────────────────────────────────────────────────────────
 
 export interface BrainOptions {
-  adapter?:    BrainAdapter;
+  adapter?:          BrainAdapter;
   /** How often to drain IPool and evaluate (ms). Default: 2000 */
-  intervalMs?: number;
+  intervalMs?:       number;
   /** Pipeline ID used as default target for control actions. Default: "pipeline://default" */
-  pipelineId?: string;
+  pipelineId?:       string;
+  /**
+   * Canonical (holy scripture) adapter — deterministic, immutable reference.
+   * When provided, Brain runs both this and the primary adapter in parallel,
+   * emits $ST-brain divergence metrics via monitor, and passes the canonical
+   * decision as context to the primary adapter on the next tick.
+   */
+  canonicalAdapter?: BrainAdapter;
+  /** Monitor to emit $ST-brain messages on. Required when canonicalAdapter is set. */
+  monitor?:          Monitor;
+}
+
+// ── Action kind classifier (for divergence comparison) ────────────────────────
+
+type ActionKind = "rerouteSchema" | "throttle" | "stop" | "updateProfile"
+  | "quarantineApprove" | "quarantineReject" | "validationUpdate" | "none";
+
+function primaryAction(d: BrainDecision): ActionKind {
+  if (d.rerouteSchema)     return "rerouteSchema";
+  if (d.throttle)          return "throttle";
+  if (d.stop)              return "stop";
+  if (d.updateProfile)     return "updateProfile";
+  if (d.quarantineApprove) return "quarantineApprove";
+  if (d.quarantineReject)  return "quarantineReject";
+  if (d.validationUpdate)  return "validationUpdate";
+  return "none";
 }
 
 export class Brain {
-  private readonly ipool:      IPool;
-  private readonly postbox:    PostBox;
-  private readonly adapter:    BrainAdapter;
-  private readonly intervalMs: number;
-  private readonly pipelineId: string;
+  private readonly ipool:           IPool;
+  private readonly postbox:         PostBox;
+  private readonly adapter:         BrainAdapter;
+  private readonly intervalMs:      number;
+  private readonly pipelineId:      string;
+  private readonly canonicalAdapter: BrainAdapter | null;
+  private readonly monitor:         Monitor | null;
   private timer: ReturnType<typeof setInterval> | null = null;
   private readonly quarantineBuffer: { pipelineId: string; payload: QuarantinePayload }[] = [];
 
   constructor(ipool: IPool, postbox: PostBox, options: BrainOptions = {}) {
-    this.ipool      = ipool;
-    this.postbox    = postbox;
-    this.adapter    = options.adapter    ?? new RuleBasedBrain();
-    this.intervalMs = options.intervalMs ?? 2000;
-    this.pipelineId = options.pipelineId ?? "pipeline://default";
+    this.ipool            = ipool;
+    this.postbox          = postbox;
+    this.adapter          = options.adapter          ?? new RuleBasedBrain();
+    this.intervalMs       = options.intervalMs       ?? 2000;
+    this.pipelineId       = options.pipelineId       ?? "pipeline://default";
+    this.canonicalAdapter = options.canonicalAdapter ?? null;
+    this.monitor          = options.monitor          ?? null;
 
     // Subscribe to quarantine inbound — buffer until next tick
     this.postbox.subscribeInbound("quarantine", (msg) => {
@@ -277,7 +307,38 @@ export class Brain {
   private async tick(): Promise<BrainDecision> {
     const packets     = this.ipool.drain();
     const quarantines = this.quarantineBuffer.splice(0);
-    const decision    = await this.adapter.evaluate({ packets, quarantines });
+    const input       = { packets, quarantines };
+
+    if (this.canonicalAdapter && this.monitor) {
+      // Run canonical (holy scripture) and primary adapter in parallel
+      const [canonicalDecision, decision] = await Promise.all([
+        this.canonicalAdapter.evaluate(input),
+        this.adapter.evaluate(input),
+      ]);
+
+      // Emit $ST-brain divergence metric
+      const canonicalAction = primaryAction(canonicalDecision);
+      const llmAction       = primaryAction(decision);
+      const aligned         = canonicalAction === llmAction;
+      this.monitor.emit({
+        type:     "st_brain",
+        schemaId: packets[0]?.schemaId ?? "*",
+        ts:       Date.now(),
+        priority: "batch",
+        payload:  {
+          aligned,
+          canonicalAction,
+          llmAction,
+          packetCount: packets.length,
+        },
+      });
+
+      // Primary adapter's decision takes effect
+      this.apply(decision);
+      return decision;
+    }
+
+    const decision = await this.adapter.evaluate(input);
     this.apply(decision);
     return decision;
   }

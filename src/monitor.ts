@@ -11,7 +11,8 @@ export type MessageType =
   | "promote"      // Gate → slot manager: promote schema to fixed slot
   | "schema_loaded" // Registry: new schema registered
   | "st_v"         // StCollector: windowed validation statistics (pass/fail)
-  | "st_f";        // StCollector: windowed flow statistics (rows/sec)
+  | "st_f"         // StCollector: windowed flow statistics (rows/sec)
+  | "st_brain";    // BrainCollector: canonical/LLM divergence statistics
 
 export type MessagePriority = "immediate" | "batch";
 
