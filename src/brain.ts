@@ -151,6 +151,8 @@ export class ClaudeBrain implements BrainAdapter {
     const { packets, quarantines } = input;
     if (packets.length === 0 && quarantines.length === 0) return {};
 
+    console.log(`[CLAUDE-BRAIN] evaluate called: packets=${packets.length} quarantines=${quarantines.length}`);
+
     const packetSummary = packets.map((p) =>
       `- bot=${p.botId} schema=${p.schemaId} severity=${p.severity} signal="${p.signal}"`,
     ).join("\n") || "(none)";
@@ -192,10 +194,15 @@ export class ClaudeBrain implements BrainAdapter {
       .map((b) => (b as { type: "text"; text: string }).text)
       .join("");
 
+    // Strip markdown code fences if model wraps JSON in ```json ... ```
+    const stripped = text.replace(/^```(?:json)?\s*/i, "").replace(/\s*```$/, "").trim();
+
+    console.log(`[CLAUDE-BRAIN] response: ${stripped.slice(0, 300)}`);
+
     try {
-      return JSON.parse(text) as BrainDecision;
+      return JSON.parse(stripped) as BrainDecision;
     } catch {
-      return { rationale: text.slice(0, 300) };
+      return { rationale: stripped.slice(0, 300) };
     }
   }
 }
