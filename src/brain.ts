@@ -132,6 +132,8 @@ export interface ClaudeBrainOptions {
   apiKey?:        string;
   /** Domain-specific context injected at the top of every prompt. */
   systemContext?: string;
+  /** The pipeline ID that control actions should target. Used in packet formatting to prevent botId/pipelineId confusion. */
+  pipelineId?:   string;
 }
 
 /**
@@ -144,11 +146,13 @@ export class ClaudeBrain implements BrainAdapter {
   private readonly client:        Anthropic;
   private readonly model:         string;
   private readonly systemContext: string;
+  private readonly pipelineId:    string;
 
   constructor(options: ClaudeBrainOptions = {}) {
     this.client        = new Anthropic({ apiKey: options.apiKey });
     this.model         = options.model ?? "claude-haiku-4-5-20251001";
     this.systemContext = options.systemContext ?? "";
+    this.pipelineId    = options.pipelineId   ?? "pipeline://default";
   }
 
   async evaluate(input: BrainInput): Promise<BrainDecision> {
@@ -157,18 +161,23 @@ export class ClaudeBrain implements BrainAdapter {
 
     console.log(`[CLAUDE-BRAIN] evaluate called: packets=${packets.length} quarantines=${quarantines.length}`);
 
+    // Format $I packets for Haiku: separate observer identity from action target.
+    // "observer" = the Bot that fired the signal (do NOT use as pipelineId target).
+    // "target_pipeline" = the pipeline to apply control actions to (from domain context).
     const packetSummary = packets.map((p) =>
-      `- bot=${p.botId} schema=${p.schemaId} severity=${p.severity} signal="${p.signal}"`,
+      `- observer=${p.botId} | schema=${p.schemaId} | severity=${p.severity} | signal="${p.signal}" | target_pipeline=${this.pipelineId}`,
     ).join("\n") || "(none)";
 
     const quarantineSummary = quarantines.map((q) =>
-      `- quarantineId=${q.payload.quarantineId} schema=${q.payload.schemaId} reason=${q.payload.reason} detail="${q.payload.detail}"`,
+      `- quarantineId=${q.payload.quarantineId} | schema=${q.payload.schemaId} | reason=${q.payload.reason} | detail="${q.payload.detail}" | target_pipeline=${this.pipelineId}`,
     ).join("\n") || "(none)";
 
     const prompt = [
       "You are a pipeline control authority (Brain AI).",
       "You receive inference signals ($I) from Bot observers and quarantined records.",
       "Based on the inputs below, decide what control action to take.",
+      "IMPORTANT: 'observer' is the Bot ID that detected the anomaly — it is NOT a pipeline target.",
+      "Always use 'target_pipeline' as the pipelineId in your actions.",
       ...(this.systemContext ? ["", "## Domain context", this.systemContext] : []),
       "",
       "$I packets:",
