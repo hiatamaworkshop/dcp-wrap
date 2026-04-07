@@ -49,6 +49,18 @@ export interface BrainDecision {
   quarantineApprove?: { pipelineId: string } & QuarantineApprovePayload;
   /** Reject a quarantined record. */
   quarantineReject?: { pipelineId: string } & QuarantineRejectPayload;
+  /**
+   * Replace the $V shadow constraints for a schema at runtime.
+   * PipelineControl applies this to SchemaRegistry immediately —
+   * next record processed uses the new constraints.
+   */
+  validationUpdate?: {
+    pipelineId: string;
+    schemaId: string;
+    constraints: import("./validator.js").VConstraint extends never
+      ? Record<string, unknown>
+      : Record<string, import("./validator.js").VConstraint>;
+  };
   /** Free-text rationale (logged, not acted on). */
   rationale?: string;
 }
@@ -277,6 +289,10 @@ export class Brain {
     if (decision.quarantineReject) {
       const { pipelineId, ...payload } = decision.quarantineReject;
       this.postbox.issueQuarantineReject(pipelineId, payload);
+    }
+    if (decision.validationUpdate) {
+      const { pipelineId, schemaId, constraints } = decision.validationUpdate;
+      this.postbox.issueValidationUpdate(pipelineId, schemaId, constraints);
     }
   }
 }
