@@ -128,8 +128,10 @@ export class RuleBasedBrain implements BrainAdapter {
 // ── ClaudeBrain ───────────────────────────────────────────────────────────────
 
 export interface ClaudeBrainOptions {
-  model?:  string;
-  apiKey?: string;
+  model?:         string;
+  apiKey?:        string;
+  /** Domain-specific context injected at the top of every prompt. */
+  systemContext?: string;
 }
 
 /**
@@ -139,12 +141,14 @@ export interface ClaudeBrainOptions {
  * and returns a structured BrainDecision.
  */
 export class ClaudeBrain implements BrainAdapter {
-  private readonly client: Anthropic;
-  private readonly model:  string;
+  private readonly client:        Anthropic;
+  private readonly model:         string;
+  private readonly systemContext: string;
 
   constructor(options: ClaudeBrainOptions = {}) {
-    this.client = new Anthropic({ apiKey: options.apiKey });
-    this.model  = options.model ?? "claude-haiku-4-5-20251001";
+    this.client        = new Anthropic({ apiKey: options.apiKey });
+    this.model         = options.model ?? "claude-haiku-4-5-20251001";
+    this.systemContext = options.systemContext ?? "";
   }
 
   async evaluate(input: BrainInput): Promise<BrainDecision> {
@@ -165,6 +169,7 @@ export class ClaudeBrain implements BrainAdapter {
       "You are a pipeline control authority (Brain AI).",
       "You receive inference signals ($I) from Bot observers and quarantined records.",
       "Based on the inputs below, decide what control action to take.",
+      ...(this.systemContext ? ["", "## Domain context", this.systemContext] : []),
       "",
       "$I packets:",
       packetSummary,
