@@ -1,10 +1,20 @@
 # dcp-wrap
 
-Convert JSON to [DCP](https://dcp-docs.pages.dev) positional-array format — fewer tokens, same accuracy.
+TypeScript implementation of [Data Cost Protocol (DCP)](https://dcp-docs.pages.dev) — compact structured data encoding for LLMs, plus a full pipeline control layer for high-throughput AI-driven data streams.
 
-## What it does
+## Two things in one package
 
-DCP strips repeated keys from structured data. Instead of sending `{"endpoint":"/v1/users","method":"GET","status":200}` per record, DCP declares the schema once and writes values by position:
+**1. DCP Encoder** — Convert JSON to positional-array format. 40–60% token reduction when feeding structured data to LLMs.
+
+**2. Pipeline Control** — A complete streaming pipeline where the LLM never enters the data path. Schema validation (`$V`), routing (`$R`), statistics (`$ST`), and Brain AI decisions — all applied without pausing the stream.
+
+See [dcp-docs.pages.dev](https://dcp-docs.pages.dev) for the full protocol design, and the [Minecraft Pipeline Demo](https://dcp-docs.pages.dev/demos/minecraft) for a working end-to-end example with measured latency numbers.
+
+---
+
+## DCP Encoding
+
+Instead of sending `{"endpoint":"/v1/users","method":"GET","status":200}` per record, DCP declares the schema once and writes values by position:
 
 ```
 ["$S","api-response:v1","endpoint","method","status","latency_ms"]
@@ -12,18 +22,12 @@ DCP strips repeated keys from structured data. Instead of sending `{"endpoint":"
 ["/v1/orders","POST",201,187]
 ```
 
-40–60% token reduction when feeding data to LLMs. Zero accuracy cost. See [benchmark](https://dcp-docs.pages.dev/dcp/specification#benchmark-dcp-vs-json-vs-natural-language).
+40–60% token reduction. Zero accuracy cost. See [benchmark](https://dcp-docs.pages.dev/dcp/specification#benchmark-dcp-vs-json-vs-natural-language).
 
 ## Install
 
 ```bash
 npm install dcp-wrap
-```
-
-Or use directly:
-
-```bash
-npx dcp-wrap
 ```
 
 ## CLI
@@ -47,8 +51,6 @@ Fields: 4
 Saved: dcp-schemas/api-response.v1.json
 Saved: dcp-schemas/api-response.v1.mapping.json
 ```
-
-The generator infers field types, detects enums, numeric ranges, and orders fields by DCP convention (identifiers → classifiers → numerics → text).
 
 ### Encode JSON to DCP
 
@@ -74,8 +76,6 @@ npx dcp-wrap inspect dcp-schemas/api-response.v1.json
 
 ### Quick — one function, no files
 
-For known structures where you define the schema inline:
-
 ```typescript
 import { dcpEncode } from "dcp-wrap";
 
@@ -96,8 +96,6 @@ const dcp = dcpEncode(records, schema, {
 ```
 
 ### Full — schema generation + encoding
-
-For unknown JSON where you want schema inference:
 
 ```typescript
 import { SchemaGenerator, DcpEncoder, DcpSchema, FieldMapping } from "dcp-wrap";
@@ -121,21 +119,11 @@ Nested objects are automatically flattened via dot-notation:
 {"id": "pr-1", "metadata": {"author": "alice", "state": "open"}}
 ```
 
-The generator maps `metadata.author` → `author`, `metadata.state` → `state`. The mapping file records the full paths for encoding.
+The generator maps `metadata.author` → `author`, `metadata.state` → `state`.
 
 ## Nested DCP (array-of-objects)
 
-Arrays of objects are encoded using **`$N` references** — the sub-schema is stored in the schema definition (`nestSchemas`), and the output references it by ID without repeating the header.
-
-```json
-[
-  {"id": "u001", "name": "Alice", "teams": [{"id": "t01", "name": "Infra", "role": "lead"}, {"id": "t02", "name": "Security", "role": "member"}]},
-  {"id": "u002", "name": "Bob",   "teams": [{"id": "t03", "name": "Frontend", "role": "member"}]},
-  {"id": "u003", "name": "Charlie", "teams": []}
-]
-```
-
-Becomes:
+Arrays of objects are encoded using **`$N` references**:
 
 ```
 ["$S","user:v1","id","name","teams"]
@@ -144,76 +132,74 @@ Becomes:
 ["u003","Charlie",["$N","user.teams:v1"]]
 ```
 
-The sub-schema structure lives in the schema definition file:
+---
 
-```json
-{
-  "$dcp": "schema",
-  "id": "user:v1",
-  "fields": ["id", "name", "teams"],
-  "nestSchemas": {
-    "teams": {
-      "schema": { "$dcp": "schema", "id": "user.teams:v1", "fields": ["id", "name", "role"], ... },
-      "mapping": { "schemaId": "user.teams:v1", "paths": { "id": "id", "name": "name", "role": "role" } }
+## Pipeline Control
+
+dcp-wrap includes a full streaming pipeline control layer. The core idea: **AI observes and reconfigures the pipeline from outside — it never enters the data path.**
+
+```
+IngestionBus
+  → Preprocessor     ← structural validation → Quarantine
+  → Gate ($V)        ← schema constraint validation → pass/fail
+  → StCollector      ← rolling statistics → $ST-v (pass_rate, throughput)
+  → Bot              ← anomaly detection → $I packets
+  → Brain (2s tick)  ← BrainAdapter.evaluate() → BrainDecision
+  → PostBox          ← routing_update / throttle / quarantine_approve
+  → PipelineControl  ← applies to next row, zero downtime
+```
+
+### Key properties
+
+- **Data path latency**: p50 = 45μs (ingest → Gate pass), measured
+- **Control path**: Brain ticks every 2s — observes `$ST` metrics, issues decisions
+- **Lazy Switching**: routing and validation changes apply to the next row, no pause, no restart (p50 = 63μs)
+- **Self-healing**: when anomaly clears, Brain restores previous routing and `$V` automatically
+
+### Brain AI interface
+
+```typescript
+import { Brain, RuleBasedBrain, ClaudeBrain } from "dcp-wrap";
+import type { BrainAdapter, BrainInput, BrainDecision } from "dcp-wrap";
+
+// Rule-based (no LLM)
+class MyBrain implements BrainAdapter {
+  async evaluate(input: BrainInput): Promise<BrainDecision> {
+    if (input.packets.some(p => p.severity === "high")) {
+      return { rerouteSchema: { schemaId: "events:v1", toPipelineId: "audit-pipeline" } };
     }
+    return {};
   }
 }
+
+// Claude (Haiku) — drop-in replacement, same interface
+const brain = new ClaudeBrain({ model: "claude-haiku-4-5-20251001" });
 ```
 
-The `$N` convention:
-- `["$N", "schema-id", [row1], [row2], ...]` — array with rows
-- `["$N", "schema-id"]` — empty array (no rows)
+Switch between rule-based and LLM with `BRAIN_MODE=claude`. The pipeline wiring is identical.
 
-### Design: static vs dynamic approach
+### Shadow layers
 
-Two approaches were evaluated for nested DCP encoding:
+| Layer | Role |
+|-------|------|
+| `$V`  | Schema constraint validation — type, range, enum. Brain can tighten or relax constraints at runtime. |
+| `$R`  | Routing table — Brain reroutes schemas to different downstream pipelines. |
+| `$ST` | Rolling statistics — pass rate, fail count, throughput per schema per 2s window. |
 
-**Dynamic (inline `$S` preamble)** — sub-schema headers emitted at the top of each output:
+For the full protocol specification and design rationale, see [dcp-docs.pages.dev/dcp/pipeline](https://dcp-docs.pages.dev/dcp/pipeline).
 
-```
-["$S","user.teams:v1","id","name","role"]         ← preamble: sub-schema declaration
-["$S","user:v1","id","name","teams"]              ← main header
-["u001","Alice",["$N","user.teams:v1",...]]        ← $N references preamble
-```
+### Working demo
 
-Pros: self-contained output, no schema file needed for decoding. Cons: preamble overhead at small N; schema declared per-output rather than per-tool.
+The [Minecraft Pipeline Demo](https://dcp-docs.pages.dev/demos/minecraft) shows all three layers working together: anomaly detection, Brain rerouting, `$V` dynamic update, Quarantine approval — verified across three scenarios with no LLM required for the data path.
 
-**Static (`nestSchemas` in schema definition)** — sub-schemas stored in the cached schema, output carries only `$N` references:
-
-```
-["$S","user:v1","id","name","teams"]
-["u001","Alice",["$N","user.teams:v1",...]]
-```
-
-Pros: no per-output overhead, schema cache is the single source of truth, round-trip serializable. Cons: consumer must have access to the schema definition to resolve `$N`.
-
-**Chosen: static.** The gateway already caches schemas per tool. Storing `nestSchemas` there is the natural fit — infer once on first call, encode with `$N` on all subsequent calls. The dynamic approach remains valid for standalone/streaming use cases where the consumer has no schema cache.
-
-### Compression characteristics
-
-| Records | JSON-only baseline | Flat DCP (no nesting) | Nested DCP (`$N`) |
-|---------|-------------------|----------------------|-------------------|
-| 3       | 0%                | ~25%                 | ~23%              |
-| 10      | 0%                | ~27%                 | ~28%              |
-| 30      | 0%                | ~28%                 | ~32%              |
-| 100     | 0%                | ~30%                 | ~33%              |
-
-At low record counts `$N` + schema-id overhead is slightly larger than repeating raw keys. At 10+ records the crossover occurs. The primary advantage is **consistency** (no JSON/DCP mixed format) and **LLM readability** (tested: Haiku 4.5 decodes nested `$N` structures with 10/10 accuracy on positional extraction tasks).
-
-### Known limitations
-
-1. **Sparse sub-fields**: When nested objects have heterogeneous keys (e.g. API responses with variable `metadata`), sub-schemas produce many nullable columns. Current mitigation: `maxDepth: 0` for sub-schemas keeps variable objects as opaque JSON.
-2. **`$N` requires schema context**: Unlike inline `$S`, the `$N` reference is only meaningful if the consumer has the `nestSchemas` definition. For the gateway use case this is always true (schema is cached). For standalone output, the dynamic preamble approach may be preferable.
-3. **Empty arrays**: `["$N", "schema-id"]` with no trailing rows. Correct behavior — zero rows, schema ID preserved for type information.
+---
 
 ## Working with messy data
 
-Real-world APIs return deeply nested objects, inconsistent fields, and dozens of keys you don't need. The generator applies three guards by default:
-
 | Guard | Default | What it does |
 |-------|---------|-------------|
-| `maxDepth` | 3 | Stops flattening at 3 levels. `a.b.c` is resolved; `a.b.c.d.e` is kept as an opaque value. |
-| `maxFields` | 20 | Keeps the top 20 fields by DCP priority (identifiers → classifiers → numerics → text). The rest are dropped. |
+| `maxDepth` | 3 | Stops flattening at 3 levels. |
+| `maxFields` | 20 | Keeps top 20 fields by DCP priority. |
 | `minPresence` | 0.1 | Fields appearing in less than 10% of samples are excluded. |
 
 Override when needed:
@@ -221,28 +207,18 @@ Override when needed:
 ```typescript
 const draft = gen.fromSamples(samples, {
   domain: "some-api",
-  maxDepth: 2,       // very flat — only top-level and one level of nesting
-  maxFields: 10,     // aggressive trim
-  minPresence: 0.5,  // field must appear in at least half the samples
+  maxDepth: 2,
+  maxFields: 10,
+  minPresence: 0.5,
 });
 ```
 
-**Always review the generated schema before using it in production.** The generator infers — it does not know your intent. Check:
-
-- Are the right fields included? Use `include` / `exclude` to override.
-- Are field names sensible? Nested paths become leaf names (`metadata.author` → `author`). Use `fieldNames` to rename.
-- Are array fields handled correctly? Arrays are auto-joined with comma in `dcpEncode()`. Use `transform` for custom serialization.
-- Is the schema ID correct? The generator derives `{domain}:v{version}` from your input. This ID is how consumers identify the schema.
-
 ## Design
 
-- **Zero runtime dependencies**
-- Schema generation follows DCP field ordering convention
-- Supports JSON arrays and newline-delimited JSON (NDJSON) as input
-- Handles nested objects, enum detection, nullable fields, numeric ranges
+- Zero runtime dependencies
+- Schema generation follows DCP field ordering convention (identifiers → classifiers → numerics → text)
+- Supports JSON arrays and NDJSON as input
 - Schema + mapping files are plain JSON — review, version, and edit them
-
-dcp-wrap handles JSON → DCP conversion. For shadow index optimization, agent profiling, and the full protocol design, see [dcp-docs.pages.dev](https://dcp-docs.pages.dev).
 
 ## License
 
